@@ -1001,3 +1001,66 @@ The skew-invariant gutter-relative approach with unit snapping fixes the Section
 ### 10.4 Disposition
 
 **ACCEPT -> forward to the auditor (Flash).** The two blockers (indentation accuracy, acceptance gate) are resolved with measured evidence. The `output.md` refresh and items in 10.2/10.3 can be handled as a small cleanup commit or folded into the next sprint.
+
+
+---
+
+## 11. Spec: Default Granite-Docling Fallback and Local-Model Backends (for the coder)
+
+**Goal:** `--vlm` must work with no cloud API key by falling back to Docling's default Granite model, and the backend layer must be extensible to local LLMs (Ollama, LM Studio, vLLM, llama.cpp, later a local Qwen VL).
+
+### 11.1 Backend resolution (`docling_engineering/vlm.py::build_backend`)
+
+| `--vlm` value | Backend |
+|---|---|
+| omitted | No VLM (current behaviour, unchanged) |
+| `--vlm` with no value, or `auto` | `gemini-2.5-flash` if `GEMINI_API_KEY`/ADC is available, else `granite`, else `dryrun` with a visible warning |
+| `gemini-<model>` | `GeminiBackend`; **if the key is missing, or a call fails, fall back to `granite`** (log once, do not abort) |
+| `granite` | `GraniteDoclingBackend` (new, below) |
+| `openai:<model>@<base_url>` (e.g. `openai:qwen2.5-vl-7b@http://localhost:11434/v1`) | `OpenAICompatBackend` (new): any OpenAI-compatible vision endpoint; optional `OPENAI_API_KEY` |
+| `dryrun` | unchanged |
+
+Implement via `argparse` `nargs="?"`, `const="auto"` on `--vlm`. All backends keep the existing `complete(image_path, prompt) -> str` contract so `VLMEnricher` and the validation layer need no changes. Unexpected backend exceptions must degrade to the deterministic OCR rendering, as `GeminiBackend` already does.
+
+### 11.2 `GraniteDoclingBackend` (important design constraint)
+
+Granite-Docling (`granite-docling-258M`, DocTags output) is a **document-conversion model, not a general instruction-following VLM**. It does not follow our custom Mode A/B/C prompts. Therefore:
+
+- **Mode A (code transcription): use it.** Convert the crop with Docling's `VlmPipeline` and `GRANITEDOCLING_TRANSFORMERS` (`GRANITEDOCLING_MLX` on Apple Silicon); extract the `code` item text, preserving its indentation. This is the one place Granite should beat OCR.
+- **Mode B (Mermaid) and Mode C (SLD topology JSON): return `""`** so the caller falls back to the deterministic renderer. Do not try to coerce DocTags into Mermaid/JSON. (If DocTags for a flowchart is later mapped to Mermaid, that is a separate feature.)
+- Keep Docling imports lazy; if `docling[vlm]` is not installed, print one actionable message (`pip install "docling[vlm]"`) and fall back to `dryrun`.
+- Cache the `DocumentConverter` per process (model load is expensive); run per crop PNG.
+
+Reference setup (installed Docling here is 2.140.0; verify symbol paths against the installed version):
+
+```python
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import VlmPipelineOptions
+from docling.datamodel.vlm_model_specs import GRANITEDOCLING_TRANSFORMERS
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.pipeline.vlm_pipeline import VlmPipeline
+
+opts = VlmPipelineOptions(vlm_options=GRANITEDOCLING_TRANSFORMERS)
+converter = DocumentConverter(format_options={
+    InputFormat.IMAGE: PdfFormatOption(pipeline_cls=VlmPipeline, pipeline_options=opts)})
+doc = converter.convert(crop_png_path).document
+```
+
+### 11.3 `OpenAICompatBackend` (local-model path)
+
+- Use the `openai` client (`base_url`, `model`, optional `api_key="not-needed"`); send the PNG as a base64 `image_url` content part plus the Mode prompt; reuse the same timeout/try-except pattern as `GeminiBackend`.
+- Add `openai` to a new `local` extra in `pyproject.toml`; add `granite = ["docling[vlm]"]` extra.
+- Because local models are weaker at strict formatting, the existing Mode B/C validation (`flowchart`/`graph` prefix, `json.loads`) is mandatory and must remain.
+
+### 11.4 Tests and acceptance
+
+1. Unit: `build_backend("auto")` with and without `GEMINI_API_KEY` (monkeypatch env) selects Gemini vs Granite vs dryrun; missing `docling[vlm]` degrades to dryrun without raising.
+2. Unit: `GraniteDoclingBackend.complete` returns `""` for Mode B/C prompts and does not import Docling when not needed (mock the converter).
+3. Unit: `GeminiBackend` constructor failure/missing key falls back to Granite.
+4. Unit: `OpenAICompatBackend` with a mocked client; failure returns `""`.
+5. Manual (user, optional, needs model download ~0.5 GB): `python scripts/pdf2md.py electricalDiagramOCR.pdf -o out.md --vlm granite` and confirm page 4/5 code blocks keep 0/4-space indentation and the benchmark gate (>= 0.590) still passes.
+6. `README.md` and this handoff: document the backend table above.
+
+### 11.5 Notes for the auditor
+
+Model-quality expectations: Granite-Docling is expected to help only code listings; Mermaid/SLD quality still depends on a general VLM (Gemini now; a local Qwen-VL class model later via `openai:` backend). Choose the local model by running the 16 exported crops through each candidate and scoring against `ref_output.md`.
