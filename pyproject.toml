@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docling-engineering"
+version = "0.1.0"
+description = "Engineering Figure Extension for IBM Docling: figure classification, VLM enrichment, and power-system rule engine"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+core = [
+    "pymupdf",
+    "pytesseract",
+    "numpy",
+    "pillow",
+]
+vlm = [
+    "google-genai",
+]
+rules = [
+    "networkx",
+]
+docling = [
+    "docling",
+]
+all = [
+    "docling-engineering[core,vlm,rules,docling]",
+]
+
+[tool.setuptools]
+packages = ["docling_engineering"]

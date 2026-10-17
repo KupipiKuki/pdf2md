@@ -10,11 +10,6 @@ Docling is an optional dependency; this module degrades gracefully to
 standalone use with externally supplied crops and OCR text.
 """
 
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
-
 try:
     from docling.document_converter import DocumentConverter, PdfFormatOption
     HAS_DOCLING = True
@@ -29,18 +24,41 @@ from .rules import build_graph, transformer_zero_sequence_rules
 
 class EngineeringFigureExtension:
     """Classify figure crops and enrich them with VLM transcription and
-    engineering rules. Usable standalone (classify/enrich) or attached to
-    a Docling conversion pipeline."""
+    engineering rules. Usable standalone (classify/enrich) or applied to
+    a converted Docling document's figure items."""
 
     def __init__(self, backend="dryrun"):
         self.classifier = FigureClassifier()
         self.enricher = VLMEnricher(backend=backend)
 
     def process_figure(self, ocr_text, image_path=None):
-        """Return (category, enriched_markdown) for one figure crop."""
+        """Return (category, enriched_markdown) for one figure crop.
+        Passthrough categories (photograph / plot) return
+        (category, None): the figure passes through unchanged."""
         category = self.classifier.classify(ocr_text, image_path)
         enriched = self.enricher.enrich(ocr_text, image_path)
         return category, enriched
+
+    def process_document(self, docling_doc):
+        """Walk a converted Docling document's picture items, enriching
+        each with a saved crop through the VLM pipeline. Returns a list
+        of (item, category, enriched_markdown). Requires docling."""
+        if not HAS_DOCLING:
+            raise ImportError("run `pip install docling` to process Docling documents")
+        results = []
+        for item, _ in docling_doc.body.iterate_items():
+            if item.label == "picture" and getattr(item, "image", None) is not None:
+                image = item.image.pil_image if hasattr(item.image, "pil_image") else item.image
+                crop_path = None
+                if image is not None:
+                    import os
+                    import tempfile
+                    fd, crop_path = tempfile.mkstemp(suffix=".png")
+                    os.close(fd)
+                    image.save(crop_path)
+                category, enriched = self.process_figure("", crop_path)
+                results.append((item, category, enriched))
+        return results
 
     def process_topology(self, topology_json):
         """Run the engineering rule engine over SLD topology JSON:
@@ -50,7 +68,7 @@ class EngineeringFigureExtension:
         return graph, rules
 
 
-def make_converter(artifacts_dir=None):
+def make_converter():
     """Build a Docling DocumentConverter for ingestion. Raises with a
     helpful message when docling is not installed."""
     if not HAS_DOCLING:

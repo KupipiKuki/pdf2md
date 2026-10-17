@@ -913,9 +913,17 @@ def reconstruct_indented_lines(word_lines):
     line from the pixel geometry: indentation is (first_word.left -
     base_left) / char_w and inter-word gaps are gap_px / char_w, where
     char_w is the median per-character word width. Gutter number words
-    (bare 1-3 digit tokens at the line start) are stripped from the
-    output and excluded from the code base column, so indentation is
-    measured relative to the first code column.
+    are kept in the output as "<gutter> <indented code>" (a single space
+    delimiter) because downstream gutter-aware logic (box_gutter_range,
+    boxes_continuing, clean_box_text's bare-number and brace repairs)
+    relies on the gutter number being present; clean_box_text consumes
+    exactly one delimiter and preserves the rebuilt indentation. The
+    gutter word is excluded from the code base column so indentation is
+    measured relative to the first code column. Inter-word gaps inside
+    a line are emitted as single spaces: char_w is a median over
+    proportional-font text, and expanding gaps multiplies spaces in
+    prose and diagram labels (``Normal  text/tables``), which is not
+    needed for the leading-indentation goal.
     """
     if not word_lines:
         return []
@@ -942,18 +950,19 @@ def reconstruct_indented_lines(word_lines):
         content = [w for w in words if w["text"].strip()]
         if not content:
             continue
+        gutter = None
         if GUTTER_RE.match(content[0]["text"]):
+            gutter = content[0]["text"]
             content = content[1:]
         if not content:
             continue
         indent_px = max(0, content[0]["left"] - base_left)
         indent_spaces = int(round(indent_px / char_w))
-        line_str = " " * indent_spaces + content[0]["text"]
-        for prev_w, curr_w in zip(content[:-1], content[1:]):
-            gap_px = curr_w["left"] - (prev_w["left"] + prev_w["width"])
-            spaces = max(1, int(round(gap_px / char_w)))
-            line_str += (" " * spaces) + curr_w["text"]
-        out.append(line_str)
+        code_str = " " * indent_spaces + " ".join(w["text"] for w in content)
+        if gutter is not None:
+            out.append(f"{gutter} {code_str}")
+        else:
+            out.append(code_str)
     return out
 
 
@@ -1261,6 +1270,13 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
                     box_overrides = vlm.enrich_box_results(
                         box_results, crop_paths,
                         fallback=lambda cleaned: render_box_cleaned(cleaned, use_mermaid))
+                    # Mode C (SLD topology) output feeds the rule engine:
+                    # sequence-network Mermaid blocks follow the JSON fence.
+                    for box, enriched in box_overrides.items():
+                        if enriched and enriched.startswith("```json"):
+                            extra = vlm.topology_markdown(enriched)
+                            if extra:
+                                box_overrides[box] = enriched + "\n\n" + extra
                 text = merge_regions(prose_lines, box_results, dpi, lang,
                                      use_mermaid=use_mermaid, box_overrides=box_overrides)
             elif all_boxes:

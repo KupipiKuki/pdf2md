@@ -17,14 +17,24 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from docling_engineering.vlm import (
-    VLMEnricher,
-    build_backend,
-    GeminiBackend,
-    DryRunBackend,
-)
-from docling_engineering.classifier import FigureClassifier, CATEGORIES
-from docling_engineering.prompts import MODE_PROMPTS
+try:
+    from docling_engineering.vlm import (
+        VLMEnricher,
+        build_backend,
+        GeminiBackend,
+        DryRunBackend,
+    )
+    from docling_engineering.classifier import FigureClassifier, CATEGORIES
+    from docling_engineering.prompts import MODE_PROMPTS
+except ImportError:  # script executed from an installed package
+    from docling_engineering.vlm import (
+        VLMEnricher,
+        build_backend,
+        GeminiBackend,
+        DryRunBackend,
+    )
+    from docling_engineering.classifier import FigureClassifier, CATEGORIES
+    from docling_engineering.prompts import MODE_PROMPTS
 
 __all__ = [
     "VLMEnricher",

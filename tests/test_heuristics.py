@@ -267,17 +267,17 @@ class TestIndentationReconstruction(unittest.TestCase):
 
     def test_four_space_python_indent(self):
         # Monospace char width ~12px: 'class' at x=75 is the code base
-        # column; 'pass' at x=178 is ~103px (~8-9 chars) right of it.
+        # column; 'pass' at x=123 is 48px (4 chars) right of it.
         lines = [
             [self.w("5", 40, 12), self.w("class", 75, 60)],
             [self.w("6", 42, 12), self.w("pass", 123, 48)],
         ]
         out = reconstruct_indented_lines(lines)
-        self.assertEqual(out[0], "class")
-        self.assertTrue(out[1].startswith(" "))
-        self.assertEqual(out[1].strip(), "pass")
-        # 48px / 12px = 4 spaces of indentation
-        self.assertEqual(len(out[1]) - len(out[1].lstrip()), 4)
+        # The gutter token is kept (single-space delimiter) so downstream
+        # gutter-aware logic (box_gutter_range, clean_box_text repairs)
+        # keeps working.
+        self.assertEqual(out[0], "5 class")
+        self.assertEqual(out[1], "6     pass")
 
     def test_two_space_json_indent(self):
         lines = [
@@ -286,18 +286,23 @@ class TestIndentationReconstruction(unittest.TestCase):
             [self.w("3", 39, 12), self.w('"confidence":', 160, 144)],
         ]
         out = reconstruct_indented_lines(lines)
-        self.assertEqual(out[0], "{")
-        self.assertEqual(len(out[1]) - len(out[1].lstrip()), 2)
-        self.assertEqual(len(out[2]) - len(out[2].lstrip()), 8)
+        self.assertEqual(out[0], "1 {")
+        # code indentation = spaces after the "<gutter> " delimiter
+        code_part = out[1].split(" ", 1)[1]
+        self.assertEqual(len(code_part) - len(code_part.lstrip()), 2)
+        # clean_box_text consumes the delimiter and keeps the indent
+        cleaned = clean_box_text("\n".join(out))
+        self.assertEqual(cleaned.splitlines()[1], '  "figure_type":')
 
-    def test_inter_word_gap_restored(self):
-        # 'Z_pu=0.10' as one word plus a far-away trailing token
+    def test_inter_word_gap_single_space(self):
+        # Inter-word gaps are NOT expanded (char_w is a median over
+        # proportional-font text); words are joined with one space.
         lines = [
             [self.w('name="T1",', 64, 84), self.w("rating_mva=100,", 184, 168)],
         ]
         out = reconstruct_indented_lines(lines)
-        # gap = 184 - (64+84) = 36px = 3 chars
-        self.assertIn('name="T1",    rating_mva=100,', out[0])
+        self.assertIn('name="T1", rating_mva=100,', out[0])
+        self.assertNotIn('  ', out[0])
 
     def test_gutter_excluded_from_base_column(self):
         # The code base column is the first NON-gutter token, so a
@@ -307,11 +312,80 @@ class TestIndentationReconstruction(unittest.TestCase):
             [self.w("2", 41, 12), self.w("nx", 123, 24)],
         ]
         out = reconstruct_indented_lines(lines)
-        self.assertEqual(out[0], "import")
-        self.assertEqual(out[1], "    nx")
+        self.assertEqual(out[0], "1 import")
+        self.assertEqual(out[1], "2     nx")
 
     def test_empty_input(self):
         self.assertEqual(reconstruct_indented_lines([]), [])
+
+
+class TestIndentationIntegration(unittest.TestCase):
+    """Full reconstruct -> clean_box_text -> estimate_code_language path:
+    the interaction QAQC flagged in handoff 8.2-A/B."""
+
+    @staticmethod
+    def w(text, left, width, top=100):
+        return {"text": text, "left": left, "top": top, "width": width, "height": 20}
+
+    def test_python_indent_survives_clean_box_text(self):
+        lines = [
+            [self.w("1", 40, 12), self.w("class", 75, 60)],
+            [self.w("2", 42, 12), self.w("Generator:", 75, 120)],
+            [self.w("3", 41, 12), self.w("pass", 123, 48)],
+        ]
+        recon = "\n".join(reconstruct_indented_lines(lines))
+        cleaned = clean_box_text(recon)
+        self.assertEqual(cleaned, "class\nGenerator:\n    pass")
+        self.assertEqual(estimate_code_language(cleaned), "python")
+
+    def test_json_indent_survives_clean_box_text(self):
+        lines = [
+            [self.w("1", 40, 12), self.w("{", 64, 12)],
+            [self.w("2", 41, 12), self.w('"figure_type":', 88, 156), self.w('"electrical",', 260, 156)],
+            [self.w("3", 39, 12), self.w("}", 64, 12)],
+        ]
+        recon = "\n".join(reconstruct_indented_lines(lines))
+        cleaned = clean_box_text(recon)
+        self.assertEqual(cleaned.splitlines()[1], '  "figure_type": "electrical",')
+        self.assertEqual(estimate_code_language(cleaned), "json")
+
+    def test_diagram_misread_token_survives(self):
+        # '3 71' (OCR misread of 'T1') must reach the diagram parser:
+        # the gutter is present, so the bare-number content is kept.
+        lines = [
+            [self.w("1", 40, 12), self.w("G", 75, 12)],
+            [self.w("2", 41, 12), self.w("|", 75, 12)],
+            [self.w("3", 39, 12), self.w("71", 75, 24)],
+            [self.w("4", 40, 12), self.w("|", 75, 12)],
+            [self.w("5", 42, 12), self.w("LINE", 75, 48)],
+        ]
+        recon = "\n".join(reconstruct_indented_lines(lines))
+        cleaned = clean_box_text(recon)
+        self.assertIn("71", cleaned)
+        ok, code = parse_ascii_diagram_to_mermaid(cleaned.splitlines())
+        self.assertTrue(ok)
+        self.assertIn("T1", code)
+
+    def test_brace_misread_repair_still_fires(self):
+        # '8 ae' (gutter + misread '}') must still be repaired to '}'.
+        lines = [
+            [self.w("7", 40, 12), self.w('"kv":', 75, 48), self.w("13.8", 140, 48)],
+            [self.w("8", 41, 12), self.w("ae", 75, 24)],
+        ]
+        recon = "\n".join(reconstruct_indented_lines(lines))
+        cleaned = clean_box_text(recon)
+        self.assertIn("}", cleaned)
+        self.assertNotIn("ae", cleaned)
+
+    def test_gutter_range_survives_reconstruction(self):
+        # box_gutter_range relies on gutters being present in box text.
+        lines = [
+            [self.w("9", 40, 12), self.w("{", 75, 12)],
+            [self.w("10", 41, 12), self.w('"id":', 75, 60)],
+            [self.w("22", 39, 12), self.w("}", 75, 12)],
+        ]
+        recon = "\n".join(reconstruct_indented_lines(lines))
+        self.assertEqual(box_gutter_range(recon), (9, 22))
 
 
 class TestFigureClassifier(unittest.TestCase):
@@ -331,11 +405,24 @@ class TestFigureClassifier(unittest.TestCase):
         text = "\n".join(tree)
         self.assertEqual(self.clf.classify_text(text), "flowchart_or_tree")
 
+    def test_empty_text_is_photograph(self):
+        self.assertEqual(self.clf.classify_text(""), "photograph")
+        self.assertEqual(self.clf.classify_text("   "), "photograph")
+
+    def test_plot_keywords(self):
+        self.assertEqual(self.clf.classify_text("axis: time (s)\nxlabel: voltage"),
+                         "plot_or_chart")
+
     def test_mode_routing(self):
         self.assertEqual(self.clf.mode_for("code_listing")[0], "A")
         self.assertEqual(self.clf.mode_for("flowchart_or_tree")[0], "B")
         self.assertEqual(self.clf.mode_for("electrical_sld")[0], "C")
         self.assertEqual(self.clf.mode_for("piping_and_instrumentation")[0], "C")
+
+    def test_passthrough_categories(self):
+        # Photographs and plots pass through unchanged: no VLM mode.
+        self.assertEqual(self.clf.mode_for("photograph"), (None, "passthrough"))
+        self.assertEqual(self.clf.mode_for("plot_or_chart"), (None, "passthrough"))
 
 
 class TestVLMEnrichment(unittest.TestCase):
@@ -354,9 +441,18 @@ class TestVLMEnrichment(unittest.TestCase):
         self.assertIn("```json", overrides[box])
         self.assertIn('"a": 1', overrides[box])
 
-    def test_postprocess_mode_a(self):
+    def test_postprocess_mode_a_keeps_language_tag(self):
         self.assertEqual(postprocess_mode_a("```python\nclass X:\n    pass\n```"),
-                         "```\nclass X:\n    pass\n```")
+                         "```python\nclass X:\n    pass\n```")
+
+    def test_postprocess_mode_a_estimates_missing_tag(self):
+        # No fence language: fall back to the heuristic estimator.
+        out = postprocess_mode_a("class X:\n    pass")
+        self.assertTrue(out.startswith("```python"))
+
+    def test_postprocess_mode_a_empty_response(self):
+        self.assertIsNone(postprocess_mode_a(""))
+        self.assertIsNone(postprocess_mode_a("```\n\n```"))
 
     def test_postprocess_mode_b(self):
         resp = "```mermaid\nflowchart TD\n    A --> B\n```"
@@ -364,10 +460,34 @@ class TestVLMEnrichment(unittest.TestCase):
         bare = "flowchart TD\n    A --> B"
         self.assertEqual(postprocess_mode_b(bare), resp)
 
+    def test_postprocess_mode_b_rejects_non_mermaid(self):
+        self.assertIsNone(postprocess_mode_b("here is some prose, not a diagram"))
+        self.assertIsNone(postprocess_mode_b("```json\n{}\n```"))
+
     def test_postprocess_mode_c(self):
         resp = '{"components": [], "connections": []}'
         self.assertEqual(postprocess_mode_c(resp),
                          "```json\n" + resp + "\n```")
+
+    def test_postprocess_mode_c_rejects_invalid(self):
+        self.assertIsNone(postprocess_mode_c("{not json"))
+        self.assertIsNone(postprocess_mode_c('{"components": []}'))
+
+    def test_passthrough_enrich_returns_none(self):
+        enricher = VLMEnricher(backend="dryrun")
+        self.assertIsNone(enricher.enrich("", "/nonexistent.png"))
+        self.assertIsNone(enricher.enrich("axis: time", "/nonexistent.png"))
+
+    def test_topology_markdown_from_mode_c(self):
+        enricher = VLMEnricher(backend="dryrun")
+        fenced = ('```json\n'
+                  '{"components": [{"id": "G", "type": "generator"},'
+                  '{"id": "M", "type": "motor"}],'
+                  '"connections": [["G", "M"]]}\n```')
+        md = enricher.topology_markdown(fenced)
+        self.assertIn("Positive Sequence Network", md)
+        self.assertIn("```mermaid", md)
+        self.assertIn("G --- M", md)
 
 
 class TestRuleEngine(unittest.TestCase):
@@ -391,6 +511,35 @@ class TestRuleEngine(unittest.TestCase):
         g = build_graph(self.TOPOLOGY)
         net = sequence_networks(g, "G", "M")
         self.assertEqual(list(net.nodes), ["G", "T1", "LINE", "M"])
+        # A network needs edges, not just nodes.
+        self.assertEqual(list(net.edges), [("G", "T1"), ("T1", "LINE"), ("LINE", "M")])
+
+    def test_sequence_mermaid_emitter(self):
+        from docling_engineering.rules import sequence_mermaid, sequence_markdown
+        g = build_graph(self.TOPOLOGY)
+        net = sequence_networks(g, "G", "M")
+        mermaid = sequence_mermaid(net, "Positive")
+        self.assertIn("flowchart TD", mermaid)
+        self.assertIn("G --- T1", mermaid)
+        self.assertIn("T1 --- LINE", mermaid)
+        md = sequence_markdown(self.TOPOLOGY)
+        self.assertIn("### Positive Sequence Network", md)
+        self.assertIn("### Negative Sequence Network", md)
+        self.assertIn("### Zero Sequence Network", md)
+        self.assertIn("zero_sequence_blocked", md)
+
+    def test_no_path_handled(self):
+        from docling_engineering.rules import sequence_markdown, chain_reactances
+        disconnected = {
+            "components": [{"id": "G", "type": "generator"},
+                           {"id": "M", "type": "motor"}],
+            "connections": [],
+        }
+        self.assertEqual(sequence_markdown(disconnected), "")
+        with self.assertRaises(ValueError):
+            chain_reactances(build_graph(disconnected), "G", "M")
+        with self.assertRaises(ValueError):
+            chain_reactances(build_graph(self.TOPOLOGY), "G", "NOPE")
 
     def test_zero_sequence_rules(self):
         rules = transformer_zero_sequence_rules(self.TOPOLOGY["components"])

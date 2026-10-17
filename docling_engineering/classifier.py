@@ -3,14 +3,20 @@
 Deterministic keyword/structure router over a box region's OCR text
 (handoff Section 6.4, Stage 2). The same classify() interface can be
 backed by a CV classifier (CLIP/ViT zero-shot) or a fast VLM call.
+
+Per the blueprint, photographs and plots are NOT sent to Mermaid or
+topology extraction: they pass through unchanged (standard Docling
+image handling), so classify() distinguishes them by OCR emptiness /
+non-textual content and mode_for() maps them to a passthrough mode.
 """
 
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
-
-from pdf2md import clean_box_text, estimate_code_language, parse_ascii_diagram_to_mermaid
+try:
+    from pdf2md import clean_box_text, estimate_code_language, parse_ascii_diagram_to_mermaid
+except ImportError:
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+    from pdf2md import clean_box_text, estimate_code_language, parse_ascii_diagram_to_mermaid
 
 CATEGORIES = (
     "photograph",
@@ -29,11 +35,15 @@ class FigureClassifier:
     SLD_KEYWORDS = ("sld", "single-line", "single line", "bus", "breaker",
                     "transformer", "relay", "ansi")
     PID_KEYWORDS = ("p&id", "piping", "instrumentation", "valve")
+    PLOT_KEYWORDS = ("axis", "xlabel", "ylabel", "chart", "graph of",
+                     "plot of", "curve", "waveform")
 
     def classify_text(self, text):
         t = (text or "").lower()
         if not t.strip():
             return "photograph"
+        if any(k in t for k in self.PLOT_KEYWORDS):
+            return "plot_or_chart"
         lang = estimate_code_language(clean_box_text(text))
         if lang in ("json", "python", "yaml", "bash"):
             return "code_listing"
@@ -51,9 +61,12 @@ class FigureClassifier:
         return self.classify_text(text)
 
     def mode_for(self, category):
-        """Map a category to its VLM prompt mode (A/B/C, handoff 6.4)."""
+        """Map a category to its VLM prompt mode (A/B/C, handoff 6.4).
+        Photographs and plots are passthrough: no VLM call."""
+        if category in ("photograph", "plot_or_chart"):
+            return None, "passthrough"
         if category in ("electrical_sld", "piping_and_instrumentation"):
             return "C", "sld_topology"
-        if category in ("flowchart_or_tree", "photograph", "plot_or_chart"):
+        if category == "flowchart_or_tree":
             return "B", "diagram_to_mermaid"
         return "A", "code_transcription"

@@ -7,7 +7,14 @@ Docling's DocumentConverter pipeline (handoff Section 6.4).
 
 from .classifier import FigureClassifier, CATEGORIES
 from .vlm import VLMEnricher, build_backend, GeminiBackend, DryRunBackend
-from .rules import build_graph, sequence_networks, transformer_zero_sequence_rules
+from .rules import (
+    build_graph,
+    sequence_networks,
+    sequence_mermaid,
+    sequence_markdown,
+    chain_reactances,
+    transformer_zero_sequence_rules,
+)
 
 __all__ = [
     "FigureClassifier",
@@ -18,5 +25,8 @@ __all__ = [
     "DryRunBackend",
     "build_graph",
     "sequence_networks",
+    "sequence_mermaid",
+    "sequence_markdown",
+    "chain_reactances",
     "transformer_zero_sequence_rules",
 ]

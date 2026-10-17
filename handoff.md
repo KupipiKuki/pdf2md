@@ -792,3 +792,72 @@ Reviewed commit `0f8ca42` on `vibe/docling-vlm-extension-blueprint`. Verified by
 ### 8.4 Disposition
 
 **Return to coder** (remediation 1-4 required for acceptance; 5-8 may follow in the same branch). Not ready for the auditor.
+
+---
+
+## 8.5 Remediation Pass (primary coder, response to Section 8)
+
+All eight remediation tasks addressed:
+
+1. **A+B fixed.** `reconstruct_indented_lines` now emits
+   `"<gutter> " + " " * indent + code` (single-space delimiter). The
+   gutter token survives, so `clean_box_text` consumes exactly one
+   delimiter and *preserves* the rebuilt indentation, and all
+   gutter-aware logic keeps working: `box_gutter_range` /
+   `boxes_continuing` (cross-page merges), bare-number content
+   (`3 71` -> `71` kept for `recover_numeric_misread`), and the brace
+   repairs (`8 ae` -> `}`). `base_left` is still computed from the
+   first non-gutter word.
+2. **C fixed.** Inter-word gap expansion removed; words are joined
+   with a single space. Leading indentation (the stated goal) is
+   unaffected because it is computed before the join. Docstring
+   documents the rationale (char_w is a median over proportional-font
+   text; expanding gaps multiplied spaces in prose and Mermaid labels).
+3. **Integration tests added** (`TestIndentationIntegration`): the
+   reconstruct -> clean_box_text -> estimate_code_language path for
+   Python (4-space `pass` survives, tagged `python`), JSON (2-space
+   keys, tagged `json`), diagram misreads (`71` kept and recovered to
+   `T1`), brace repair (`8 ae` -> `}`), and `box_gutter_range` on
+   reconstructed text. Unit tests for the reconstruction itself were
+   corrected to assert the gutter-preserving contract.
+4. **End-to-end re-run not possible in this sandbox** (no test PDF, no
+   tesseract binary). `scripts/benchmark_ref.py` now enforces the gate
+   with `--min-ratio` (default 0.590, the baseline): it exits non-zero
+   below the threshold. The verification pass must re-run the
+   conversion and the benchmark; acceptance per 8.3-4.
+5. **D+E fixed.** `postprocess_mode_a` preserves the VLM's fence
+   language tag and falls back to `estimate_code_language`;
+   `postprocess_mode_b` validates the response is a
+   `flowchart`/`graph` before accepting; `postprocess_mode_c` validates
+   `json.loads` plus the components/connections schema shape; invalid
+   responses return None and fall back to the deterministic render.
+   `FigureClassifier` now returns `photograph` (empty OCR) and
+   `plot_or_chart` (plot keywords), and `mode_for` maps both to a
+   passthrough (no VLM call), per the blueprint. `GeminiBackend`
+   imports google-genai lazily (no sys.exit on missing dependency) and
+   wraps the API call in try/except with a 60s timeout, returning ""
+   on any error so the conversion never aborts.
+6. **F fixed.** `sequence_networks` emits edges (nodes AND chain
+   edges); `sequence_mermaid` renders a network as a Mermaid chain;
+   `sequence_markdown` produces the full Positive/Negative/Zero
+   sequence Markdown from topology JSON (auto-locating generator and
+   motor endpoints); `chain_reactances` raises ValueError (not raw
+   NetworkXNoPath) on missing nodes/paths; `vector_group` is consulted
+   in the zero-sequence rules. Mode C output is wired: `convert()`
+   feeds each enriched `json` fence to `VLMEnricher.topology_markdown`
+   and appends the sequence-network blocks behind `--vlm`.
+7. **G fixed.** `pyproject.toml` added with optional extras
+   (`core`, `vlm`, `rules`, `docling`, `all`) declaring pymupdf,
+   pytesseract, numpy, pillow, google-genai, networkx, and docling.
+   sys.path hacks removed from `docling_plugin.py`; `vlm.py` /
+   `classifier.py` import `pdf2md` directly with a fallback only for
+   the uninstalled-repo case; the scripts' re-export wrapper keeps a
+   guarded path insert for script execution.
+8. **Benchmark gate added** (`--min-ratio`, non-zero exit below the
+   threshold). Default is the exact measured baseline 0.589623 (a
+   no-regression gate that the unchanged pre-fix output.md passes);
+   the QAQC acceptance run should use `--min-ratio 0.590`.
+
+Tests: 44 -> 60, all passing. Remaining for the verification pass:
+end-to-end regeneration of `output.md` on the 6-page PDF and the
+similarity number for the handoff record.
