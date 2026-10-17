@@ -726,3 +726,69 @@ Executed the Section 6.5 roadmap in order:
    and `python scripts/benchmark_ref.py` to confirm the indentation
    fix against the reference (expect Page 4 `pass` at 4 spaces and
    JSON keys at 2 spaces).
+
+
+---
+
+## 8. QAQC Review of Section 7 Implementation (Claude Sonnet) — Verdict: REMEDIATION REQUIRED
+
+Reviewed commit `0f8ca42` on `vibe/docling-vlm-extension-blueprint`. Verified by running the unit suite, the smoke test, and the full 6-page PDF end-to-end (`--export-crops`, `--vlm dryrun`) and scoring with `scripts/benchmark_ref.py`.
+
+### 8.1 Checkpoint Matrix
+
+| # | Requirement (Section 6.5) | Status | Evidence |
+|---|---|---|---|
+| 1 | Indentation fix via `image_to_data` | **FAIL (e2e)** | Functions exist and unit tests pass, but real output still has zero indentation (`class Generator:` / `pass` flush-left, JSON keys flush-left). See 8.2-A. |
+| 1b | Unit tests for word-coordinate indentation | PASS (but misleading) | Tests only call `reconstruct_indented_lines` in isolation; no test covers the `reconstruct -> clean_box_text` path where the bug lives. |
+| 2 | `--export-crops DIR` | **PASS** | 16 PNGs `pageN_boxK.png` written for the 6-page PDF. |
+| 3 | `--vlm` routing + prompts (Mode A/B/C) | PARTIAL | `dryrun` works and falls back cleanly. Live Gemini path is untested (no API key); defects in 8.2-D/E. |
+| 3b | Benchmark vs `ref_output.md` | PARTIAL | Script exists but shows the change is a **regression** (8.2-B). Exit code is meaningless (`ratio > 0`). |
+| 4 | `docling_engineering` package | PARTIAL | Modules exist; no packaging metadata, no real Docling registration, rule engine incomplete (8.2-F/G). |
+| - | Unit suite | PASS | 44/44; smoke test passes. |
+| - | Handoff claim "baseline 0.590" | n/a | Baseline `output.md` = 0.590. New pipeline output = **0.498**. |
+
+### 8.2 Findings
+
+**A. [BLOCKER] Indentation still lost — root cause is an interaction bug.**
+`reconstruct_indented_lines` strips the gutter word and computes indent correctly, but `clean_box_text` then sees a line with *no gutter* and takes the `else: line = raw.strip()` branch, deleting the indentation just rebuilt. Result: zero change to code indentation in `output`.
+
+**B. [BLOCKER] Net regression: 0.590 -> 0.498 line similarity, new content loss.** Versus the baseline `output.md`:
+- Page 3 chain Mermaid lost `T1`/`T2` (`G --- LINE --- M`). Cause: `clean_box_text` drops bare-number lines as "ghost gutters" only when there is no gutter; since the gutter is now stripped upstream, the `71`/`72` (misread `T1`/`T2`) lines are dropped.
+- Positive Sequence Mermaid chain lost; Positive and Negative chains collapse into one unparsed text fence with bare `+` lines.
+- Page 4/5 code boxes merged into one fence (`class Breaker:` and `Transformer (` in the same block); the `Example:` box vanished from page 5.
+- Cause for the continuation regressions: `box_gutter_range` / `boxes_continuing` and the gutter-aware `clean_box_text` repairs (`8 }` -> `ae`, `+}`) rely on gutter numbers being present in the OCR text. Stripping them in `reconstruct_indented_lines` silently disables all of it.
+
+**C. [MAJOR] Spurious multi-spaces in prose/diagram text.** Inter-word gaps are expanded by `gap_px / char_w`; `char_w` is a median over proportional-font text, so labels become `Normal  text/tables`, `Vision  Model  +  Engineering Agent`, `"id":  "G"`. These leak into Mermaid node labels. Inter-word expansion is also not needed for the stated goal (leading indentation).
+
+**D. [MAJOR] Mode A drops the language tag.** `postprocess_mode_a` always emits a bare ``` fence, discarding the ```python/```json tag the VLM was asked to produce (and the original requirement for language tagging). Should reuse the captured fence language or fall back to `estimate_code_language`.
+
+**E. [MAJOR] Classifier/router defects.**
+- `photograph` returns only for empty OCR text; `plot_or_chart` is never returned.
+- `mode_for` routes `photograph`/`plot_or_chart` to Mode B (Mermaid), contradicting the blueprint (photos/plots pass through unchanged).
+- Any unmatched text defaults to `code_listing`.
+- `GeminiBackend.complete` has no try/except; the module docstring promises fallback "on API error" but any exception aborts the whole conversion. No timeout/retry. Mode B/C responses are not validated (`json.loads` for Mode C, `flowchart`/`graph` prefix for Mode B) before overriding the deterministic render.
+
+**F. [MAJOR] Rule engine incomplete vs Stage 4/5.**
+- `sequence_networks` adds nodes only (no edges), so it is not a network; the test only asserts node order.
+- No positive/negative/zero-sequence Mermaid generation; no use of `vector_group`; `chain_reactances` has no handling for `nx.NetworkXNoPath`/missing nodes.
+- Mode C output is emitted as a raw JSON fence and **never** passed to `build_graph`; the VLM->rule engine->Markdown pipeline is not wired.
+
+**G. [MINOR] Packaging/structure.**
+- No `pyproject.toml`/`setup.cfg`; every module uses `sys.path.insert(...)` to reach `scripts/pdf2md.py`, and `docling_engineering.vlm` imports `pdf2md` which re-imports the script (double-import, side-effect `configure_tesseract()`).
+- `EngineeringFigureExtension` does not register with Docling; `make_converter` returns a stock `DocumentConverter()`.
+- `networkx`, `google-genai`, `docling` are not declared in any requirements file.
+
+### 8.3 Remediation Tasks for the Coder (in priority order)
+
+1. **Fix A+B together.** In `reconstruct_indented_lines`, do NOT drop the gutter token: emit `"<gutter> " + " " * indent + code` (single space delimiter). `clean_box_text` already consumes exactly one delimiter and preserves the rest, and all gutter-aware logic (`box_gutter_range`, `boxes_continuing`, bare-number and brace repairs) keeps working. Compute `base_left` from the first non-gutter word as today.
+2. **Fix C.** Drop inter-word gap expansion (use a single space), or only expand when the line is a monospace box (e.g. `char_w` variance low). Update `test_inter_word_gap_restored` accordingly.
+3. **Add integration tests** that go through `ocr_region_geometry`-shaped data -> `clean_box_text` -> `estimate_code_language`, asserting `pass` keeps 4 leading spaces and gutter-aware repairs still fire (`71` kept in a diagram line; `8 }` repair).
+4. **Re-run** `python scripts/pdf2md.py electricalDiagramOCR.pdf -o output.md` and `python scripts/benchmark_ref.py`. **Acceptance gate:** similarity must be >= 0.590 (baseline), Page 4 `pass` = 4 spaces, JSON keys = 2 spaces, page-3/4 chains and Page 5 `Example:` box restored. Record the new number in this handoff.
+5. **Fix D, E.** Preserve Mode A language tag; return `photograph`/`plot_or_chart` passthrough (no VLM call); wrap Gemini call in try/except with fallback + timeout; validate Mode B/C output before override.
+6. **Fix F.** Add edges to `sequence_networks`; add Mermaid emitters for positive/negative/zero sequence; handle no-path errors; wire Mode C JSON -> `build_graph` -> sequence Mermaid blocks in `convert()` behind `--vlm`.
+7. **Fix G.** Add `pyproject.toml` with optional extras (`vlm`, `docling`, `rules`); remove `sys.path` hacks by moving shared heuristics into an importable module.
+8. Make `benchmark_ref.py` fail non-zero below a `--min-ratio` threshold.
+
+### 8.4 Disposition
+
+**Return to coder** (remediation 1-4 required for acceptance; 5-8 may follow in the same branch). Not ready for the auditor.
