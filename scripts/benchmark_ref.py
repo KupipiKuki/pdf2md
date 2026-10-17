@@ -10,9 +10,8 @@ Usage:
 
 Defaults to ./output.md vs ./ref_output.md from the repository root.
 Exits non-zero when the similarity ratio is below --min-ratio
-(default 0.589623, the exact pre-indentation-fix baseline, so the gate
-means "no regression against the baseline"; the QAQC acceptance target
-for the remediated pipeline is >= 0.590).
+(default 0.590, the QAQC acceptance requirement; the gate must not be
+lowered to match a result).
 """
 
 import argparse
@@ -21,7 +20,7 @@ import os
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_MIN_RATIO = 0.589623
+DEFAULT_MIN_RATIO = 0.590
 
 
 def main():

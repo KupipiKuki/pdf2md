@@ -902,6 +902,20 @@ def ocr_region(img, lang, config):
             os.unlink(tmp_path)
 
 
+def _snap_indents(values):
+    """Snap raw indentation values (in character columns) to the box's
+    indentation unit. The unit is inferred as the largest of (4, 2) whose
+    multiples lie within +/-1 column of every observed value, so OCR
+    pixel jitter of a column or two cannot produce odd indents (the
+    6/3/9-column artifacts QAQC observed)."""
+    if not values:
+        return values
+    for unit in (4, 2):
+        if all(abs(v - unit * round(v / unit)) <= 1 for v in values):
+            return [unit * round(v / unit) for v in values]
+    return [max(0, round(v)) for v in values]
+
+
 def reconstruct_indented_lines(word_lines):
     """Reconstruct monospace text lines with their visual indentation from
     word-level bounding boxes.
@@ -909,58 +923,87 @@ def reconstruct_indented_lines(word_lines):
     ``word_lines`` is a list of lines, each a list of word dicts with keys
     ``text``, ``left``, ``top``, ``width``, ``height``. Under PSM 6,
     Tesseract's image_to_string collapses all intra-line whitespace runs to
-    a single space, permanently losing code indentation; this rebuilds each
-    line from the pixel geometry: indentation is (first_word.left -
-    base_left) / char_w and inter-word gaps are gap_px / char_w, where
-    char_w is the median per-character word width. Gutter number words
-    are kept in the output as "<gutter> <indented code>" (a single space
-    delimiter) because downstream gutter-aware logic (box_gutter_range,
-    boxes_continuing, clean_box_text's bare-number and brace repairs)
-    relies on the gutter number being present; clean_box_text consumes
-    exactly one delimiter and preserves the rebuilt indentation. The
-    gutter word is excluded from the code base column so indentation is
-    measured relative to the first code column. Inter-word gaps inside
-    a line are emitted as single spaces: char_w is a median over
-    proportional-font text, and expanding gaps multiplies spaces in
-    prose and diagram labels (``Normal  text/tables``), which is not
-    needed for the leading-indentation goal.
+    a single space, permanently losing code indentation; this rebuilds
+    each line from the pixel geometry.
+
+    Skew- and glyph-bias handling (QAQC 9.2-A):
+
+    - ``char_w`` is the median per-character width of code-like tokens
+      only (len >= 2 and containing a letter or underscore): pure
+      digits and single-character glyphs are narrower and biased the
+      old whole-box median.
+    - Indentation is measured relative to the SAME line's gutter number
+      word (offset = first code word left - (gutter left + gutter
+      width)), which is invariant to the ~0.2 degree scan skew because
+      the gutter word shares its line's skew. The base is the minimum
+      offset across the box (the outermost code column); boxes without
+      gutters fall back to the minimum code left.
+    - Raw column indents are snapped to the box's indentation unit
+      (2 or 4 columns) inferred from the observed values
+      (``_snap_indents``).
+
+    Gutter number words are kept in the output as
+    ``"<gutter> <indented code>"`` (a single space delimiter) because
+    downstream gutter-aware logic (box_gutter_range, boxes_continuing,
+    clean_box_text's bare-number and brace repairs) relies on the gutter
+    number being present; clean_box_text consumes exactly one delimiter
+    and preserves the rebuilt indentation. Inter-word gaps inside a
+    line are emitted as single spaces.
     """
     if not word_lines:
         return []
-    char_widths = [
-        w["width"] / max(1, len(w["text"]))
-        for line in word_lines for w in line
-        if w["text"].strip()
-    ]
+
+    char_widths = []
+    for line in word_lines:
+        for w in line:
+            t = w["text"].strip()
+            if len(t) >= 2 and re.search(r"[A-Za-z_]", t):
+                char_widths.append(w["width"] / len(t))
     char_w = float(numpy.median(char_widths)) if char_widths else 12.0
     if char_w <= 0:
         char_w = 12.0
 
-    code_lefts = []
+    parsed = []
     for words in word_lines:
         content = [w for w in words if w["text"].strip()]
-        if content and GUTTER_RE.match(content[0]["text"]):
+        if not content:
+            continue
+        gutter_text = None
+        anchor = content[0]["left"]
+        if GUTTER_RE.match(content[0]["text"]):
+            gutter_text = content[0]["text"]
+            anchor = content[0]["left"] + content[0]["width"]
             content = content[1:]
-        if content:
-            code_lefts.append(content[0]["left"])
-    base_left = min(code_lefts) if code_lefts else 0
+            if not content:
+                continue
+        parsed.append((gutter_text, anchor, content))
+
+    if not parsed:
+        return []
+
+    gutter_offsets = [c[0]["left"] - anchor
+                     for g, anchor, c in parsed if g]
+    if gutter_offsets:
+        base = min(gutter_offsets)
+        base_code_left = min(c[0]["left"] for g, a, c in parsed if g)
+    else:
+        base = None
+        base_code_left = min(c[0]["left"] for g, a, c in parsed)
+
+    raw_indents = []
+    for gutter_text, anchor, content in parsed:
+        if gutter_text is not None:
+            indent_px = content[0]["left"] - anchor - base
+        else:
+            indent_px = content[0]["left"] - base_code_left
+        raw_indents.append(max(0, indent_px) / char_w)
+    indents = _snap_indents(raw_indents)
 
     out = []
-    for words in word_lines:
-        content = [w for w in words if w["text"].strip()]
-        if not content:
-            continue
-        gutter = None
-        if GUTTER_RE.match(content[0]["text"]):
-            gutter = content[0]["text"]
-            content = content[1:]
-        if not content:
-            continue
-        indent_px = max(0, content[0]["left"] - base_left)
-        indent_spaces = int(round(indent_px / char_w))
-        code_str = " " * indent_spaces + " ".join(w["text"] for w in content)
-        if gutter is not None:
-            out.append(f"{gutter} {code_str}")
+    for (gutter_text, anchor, content), indent in zip(parsed, indents):
+        code_str = " " * max(0, int(indent)) + " ".join(w["text"] for w in content)
+        if gutter_text is not None:
+            out.append(f"{gutter_text} {code_str}")
         else:
             out.append(code_str)
     return out

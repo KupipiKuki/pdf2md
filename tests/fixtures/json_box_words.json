@@ -1,0 +1,24 @@
+{
+  "description": "Word-box data captured from image_to_data (PSM 6) on a skewed scan of a JSON classification box (electricalDiagramOCR.pdf page 1 style). Skew shifts each line ~2-3 px; key/value indentation unit is 2 columns.",
+  "char_width": 12,
+  "lines": [
+    {"words": [
+      {"text": "1", "left": 39, "top": 58, "width": 9, "height": 22},
+      {"text": "{", "left": 78, "top": 58, "width": 10, "height": 22}
+    ]},
+    {"words": [
+      {"text": "2", "left": 42, "top": 88, "width": 9, "height": 22},
+      {"text": "\"figure_type\":", "left": 112, "top": 88, "width": 168, "height": 22},
+      {"text": "\"electrical_single", "left": 286, "top": 88, "width": 240, "height": 22}
+    ]},
+    {"words": [
+      {"text": "3", "left": 45, "top": 118, "width": 9, "height": 22},
+      {"text": "\"confidence\":", "left": 116, "top": 118, "width": 160, "height": 22},
+      {"text": "0.94", "left": 284, "top": 118, "width": 48, "height": 22}
+    ]},
+    {"words": [
+      {"text": "4", "left": 48, "top": 148, "width": 9, "height": 22},
+      {"text": "}", "left": 83, "top": 148, "width": 10, "height": 22}
+    ]}
+  ]
+}

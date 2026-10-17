@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for pdf2md pure heuristics and structure parsing."""
 
+import json
 import unittest
 import sys
 import os
@@ -386,6 +387,65 @@ class TestIndentationIntegration(unittest.TestCase):
         ]
         recon = "\n".join(reconstruct_indented_lines(lines))
         self.assertEqual(box_gutter_range(recon), (9, 22))
+
+    @staticmethod
+    def load_words(fixture):
+        fixture_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "fixtures", fixture)
+        with open(fixture_path) as f:
+            data = json.load(f)
+        return [[dict(w) for w in line["words"]] for line in data["lines"]]
+
+    def test_domain_model_fixture_indentation(self):
+        # Real-geometry regression (QAQC 9.4-1): word boxes from a
+        # skewed scan of the page-4 domain model. All class lines at 0,
+        # every pass at exactly 4, regardless of per-line skew.
+        lines = self.load_words("domain_model_words.json")
+        out = reconstruct_indented_lines(lines)
+        self.assertEqual(out[0], "1 class Generator:")
+        self.assertEqual(out[1], "2     pass")
+        self.assertEqual(out[2], "3 class Transformer:")
+        self.assertEqual(out[3], "4     pass")
+        self.assertEqual(out[4], "5 class Bus:")
+        self.assertEqual(out[5], "6     pass")
+        cleaned = clean_box_text("\n".join(out))
+        expected = (
+            "class Generator:\n"
+            "    pass\n"
+            "class Transformer:\n"
+            "    pass\n"
+            "class Bus:\n"
+            "    pass"
+        )
+        self.assertEqual(cleaned, expected)
+
+    def test_json_box_fixture_indentation(self):
+        # Real-geometry regression (QAQC 9.4-1): word boxes from a
+        # skewed scan of the page-1 JSON box. Keys at exactly 2 spaces,
+        # braces flush left.
+        lines = self.load_words("json_box_words.json")
+        out = reconstruct_indented_lines(lines)
+        self.assertEqual(out[0], "1 {")
+        self.assertEqual(out[1], '2   "figure_type": "electrical_single')
+        self.assertEqual(out[2], '3   "confidence": 0.94')
+        self.assertEqual(out[3], "4 }")
+        cleaned = clean_box_text("\n".join(out))
+        self.assertEqual(cleaned.splitlines()[1], '  "figure_type": "electrical_single')
+        self.assertEqual(cleaned.splitlines()[2], '  "confidence": 0.94')
+
+    def test_snap_indents_quantizes_jitter(self):
+        # OCR jitter of a column or two must not produce odd indents
+        # (the 6/3/9-space artifacts QAQC observed).
+        from pdf2md import _snap_indents
+        self.assertEqual(_snap_indents([0.2, 3.9, 4.2, 8.1]), [0, 4, 4, 8])
+        self.assertEqual(_snap_indents([1.9, 4.1, 6.2]), [2, 4, 6])
+        # The snap is deliberately generous (+/-1 column): values near
+        # a 4-multiple snap to the 4-column grid, values only near a
+        # 2-multiple snap to the 2-column grid. The plain-rounding
+        # fallback fires only for values off both grids by > 1 column.
+        self.assertEqual(_snap_indents([1.0, 5.0]), [0, 4])
+        self.assertEqual(_snap_indents([1.4, 5.4]), [2, 6])
+        self.assertEqual(_snap_indents([1.6, 5.6]), [2, 6])
 
 
 class TestFigureClassifier(unittest.TestCase):

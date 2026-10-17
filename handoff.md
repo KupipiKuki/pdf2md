@@ -913,3 +913,53 @@ Suggested fix: measure indentation **relative to the same line's gutter number**
 ### 9.5 Disposition
 
 Return to coder (Round 2). Structural regressions from Section 8 are fixed; the remaining blocker is the quality of the indentation reconstruction and the failed acceptance gate. Not ready for the auditor.
+
+---
+
+## 9.6 Remediation Pass Round 2 (primary coder, response to Section 9)
+
+1. **Indentation accuracy (9.2-A) — rebuilt on QAQC's suggested
+   geometry.** `reconstruct_indented_lines` now:
+   - measures each line's indent **relative to that line's own gutter
+     number word** (first code word left - (gutter left + gutter
+     width)), which is invariant to the ~0.2-degree scan skew because
+     the gutter word shares its line's skew;
+   - takes the box base as the **minimum gutter-relative offset** (the
+     outermost code column), removing the single-outlier `min
+     (code_lefts)` bias; gutter-less boxes fall back to the minimum
+     code left;
+   - derives `char_w` from **code-like tokens only** (len >= 2 and
+     containing a letter or underscore), excluding the narrow digit
+     and single-glyph words that biased the old whole-box median;
+   - **snaps** raw column indents to the box's indentation unit via the
+     new `_snap_indents` (largest of 4/2 whose multiples lie within
+     +/-1 column of every observed value), eliminating the 6/3/9-space
+     artifacts.
+   Verified on a synthetic skewed domain-model box (per-line +3px
+   drift): all `class` lines at 0, every `pass` at exactly 4.
+2. **Real-geometry regression fixtures (9.4-1).** Added
+   `tests/fixtures/domain_model_words.json` and
+   `tests/fixtures/json_box_words.json` (word-box data with per-line
+   skew, narrow digit glyphs, and pixel jitter) plus three tests:
+   all three `class` lines at 0 / each `pass` at 4 / `"figure_type"`
+   and `"confidence"` at 2, asserted through both the reconstruction
+   and the `clean_box_text` path.
+3. **Gate restored (9.2-B).** `--min-ratio` default is back to 0.590
+   (QAQC acceptance requirement; not lowered to match a result). The
+   stale pre-fix `output.md` (0.589623) correctly fails the gate.
+4. **Acceptance run (9.4-3)** still requires the 6-page test PDF and
+   the tesseract binary, which are not available in this sandbox.
+   The verification pass must run:
+   `python scripts/pdf2md.py electricalDiagramOCR.pdf -o output.md`
+   then
+   `python scripts/benchmark_ref.py output.md ref_output.md --min-ratio 0.590`
+   (exit 0 required) and commit the refreshed `output.md`. Per the
+   fixture-verified reconstruction, the expected indent repairs are:
+   page-4 classes all at 0 with `pass` at 4; page-5 `Transformer (` at
+   0 with keyword args at 4; page-1/page-2 JSON keys at 2.
+5. **Non-blocking (9.4-4)** noted for a follow-up: moving the shared
+   heuristics out of `scripts/pdf2md.py` so the installed
+   `docling_engineering` package is repo-layout independent.
+
+Tests: 60 -> 63, all passing. Section 9.2-C brace artifacts are
+pre-existing accepted OCR limitations (unchanged by this round).
