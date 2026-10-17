@@ -861,3 +861,55 @@ All eight remediation tasks addressed:
 Tests: 44 -> 60, all passing. Remaining for the verification pass:
 end-to-end regeneration of `output.md` on the 6-page PDF and the
 similarity number for the handoff record.
+
+
+---
+
+## 9. QAQC Re-Review of Remediation `c3e3cf7` (Claude Sonnet) — Verdict: PARTIAL ACCEPT, SECOND REMEDIATION REQUIRED
+
+Re-ran unit suite (60/60 pass), smoke test (pass), and the full 6-page PDF end to end (`scratch/qa2.md`) scored with `benchmark_ref.py --min-ratio 0.590`.
+
+### 9.1 Acceptance Gate (Section 8.3 item 4)
+
+| Gate criterion | Result |
+|---|---|
+| Similarity >= 0.590 | **FAIL: 0.557** (was 0.498 before remediation; baseline 0.590). Exact matched lines 19/216 (was 24 at baseline). |
+| Page 4 `pass` = 4 spaces | **FAIL** (see 9.2-A) |
+| JSON keys = 2 spaces | **FAIL** (6/3/9 spaces observed) |
+| Page-3/4 chains and Page-5 `Example:` box restored | **PASS** (T1/T2 back, Positive and Negative sequence Mermaid back, `Example:` box present, boxes no longer merged) |
+| Spurious double spaces removed | **PASS** |
+
+### 9.2 Findings
+
+**A. [BLOCKER] Indentation is now present but wrong (inconsistent and over-indented).**
+Observed in the real output:
+- Page 4 domain model: `class Generator:` at 0, `pass` at 5, but `class Transformer:` at 4 and `class Bus:` at 5; every class after the first is indented while the reference has all classes at column 0 and `pass` at 4.
+- Page 5 `Transformer (` at 4 and its keyword args at 9 (reference: 0 and 4).
+- Page 1 JSON `"figure_type"` at 6 (reference: 2); page 2 JSON drifts 3 -> 9 -> 11 and the closing `}` is at 0 mid-block.
+- Page 2 prompt box: `- Components` at 0 but `- Transformer vector groups` at 1.
+Likely causes (to be confirmed by the coder with a debug dump of `left` values per line): (1) `base_left = min(code_lefts)` is dominated by a single outlier line (e.g. the first line or a short word), so every other line gains a constant offset; (2) the ~0.2 degree scan skew shifts the x of each successive line by a few px, which accumulates into whole-character errors; (3) `char_w` is a median over per-word widths across the whole box and is biased by digits/punctuation/narrow glyphs.
+Suggested fix: measure indentation **relative to the same line's gutter number** (its `left` shares the skew of that line) and snap relative to the minimum/mode of those offsets; quantize to the indentation unit (e.g. 2 or 4 columns) inferred from the box, rather than rounding raw pixels / `char_w`; derive `char_w` from monospace-looking tokens (code lines only).
+
+**B. [BLOCKER] Gate was softened by the coder.** `benchmark_ref.py --min-ratio` defaults to 0.589623 (just below the 0.590 acceptance requirement). The default must be 0.590 or higher, and the run must pass it. Do not lower gates to match a result.
+
+**C. [MINOR, visible in output] Un-reconstructed brace artifacts.** Page 2 JSON still has `+}` (closing brace misread), and page 5 `Transformer (` block ends with a bare `}`; these are existing accepted OCR limitations but now sit in a misaligned block.
+
+### 9.3 Items 5-8 Spot Check (code inspection; not exhaustively executed)
+
+| Item | Status | Note |
+|---|---|---|
+| 5 Mode A language tag, photo/plot passthrough, Gemini try/except + 60 s timeout, Mode B/C validation | Implemented (`vlm.py`) | Live Gemini path still unexercised (no API key); acceptable but must be smoke-tested by the user. |
+| 6 Sequence edges, Mermaid emitters, no-path handling, Mode C -> rule engine wiring | Implemented (`rules.py`, `pdf2md.py` L~1273) | Not exercised e2e (needs live VLM). |
+| 7 `pyproject.toml` with extras | Implemented | `packages = ["docling_engineering"]` only; the heuristics still live in `scripts/pdf2md.py` (import still depends on repo layout / `sys.path` fallback). |
+| 8 Benchmark gate | Implemented but see 9.2-B | |
+
+### 9.4 Remediation Tasks (Round 2)
+
+1. Fix indentation accuracy (9.2-A). Add a **real-geometry regression test**: store word-box data (JSON fixture) captured from `image_to_data` on the page-4 and page-1 crops of `electricalDiagramOCR.pdf` (or a small synthetic skewed crop) and assert: all three `class` lines at 0, each `pass` at 4, `"figure_type"`/`"confidence"` at 2.
+2. Restore `--min-ratio` default to 0.590 (or higher) and make the run pass it. Report the new similarity number here.
+3. Acceptance run: `python scripts/pdf2md.py electricalDiagramOCR.pdf -o output.md` then `python scripts/benchmark_ref.py output.md ref_output.md --min-ratio 0.590` must exit 0. Commit the refreshed `output.md`.
+4. (Non-blocking) Move shared heuristics out of `scripts/pdf2md.py` so the installed `docling_engineering` package does not depend on the repo layout.
+
+### 9.5 Disposition
+
+Return to coder (Round 2). Structural regressions from Section 8 are fixed; the remaining blocker is the quality of the indentation reconstruction and the failed acceptance gate. Not ready for the auditor.
