@@ -240,6 +240,56 @@ def estimate_code_language(code):
     return ""
 
 
+MATH_TOKEN_RE = re.compile(r"^[XYZ](?:[T_]?\w+)?\s*\(?[\w,.\s]*\)?$", re.IGNORECASE)
+
+
+def math_chain_to_mermaid(lines):
+    """Convert vertical math addition chains (Xs(G) / + / XT1 / + ...)
+    into an undirected Mermaid chain. Sequence-network diagrams in this
+    domain use '+' as the series connector; the graph they represent is
+    a chain of reactances. Returns (is_math_chain, mermaid_code)."""
+    if isinstance(lines, str):
+        lines = lines.splitlines()
+    cleaned = [l.strip() for l in lines if l.strip()]
+    if len(cleaned) < 5:
+        return False, ""
+    tokens = []
+    expect_plus = False
+    for l in cleaned:
+        if l == "+":
+            if not tokens:
+                return False, ""
+            expect_plus = False
+            continue
+        if expect_plus:
+            return False, ""
+        if not MATH_TOKEN_RE.match(l):
+            return False, ""
+        tokens.append(l)
+        expect_plus = True
+    if len(tokens) < 3:
+        return False, ""
+    out = ["flowchart TD"]
+    ids = []
+    for i, t in enumerate(tokens):
+        nid = f"N{i+1}"
+        ids.append(nid)
+        out.append(f'    {nid}["{t}"]')
+    for a, b in zip(ids, ids[1:]):
+        out.append(f"    {a} --- {b}")
+    return True, "\n".join(out)
+
+
+def recover_numeric_misread(label):
+    """OCR often reads 'T1'/'T2' as '71'/'72' inside vertical network
+    chain diagrams. Restore 'T<digit>' for bare two-digit tokens starting
+    with 7 or 1 in a chain context."""
+    s = label.strip()
+    if re.fullmatch(r"[17]\d", s):
+        return f"T{s[1]}"
+    return label
+
+
 def parse_ascii_diagram_to_mermaid(lines):
     """Attempt to parse an ASCII flow chart, tree diagram, or linear pipeline into Mermaid.
     Returns (is_diagram: bool, mermaid_code: str)."""
@@ -248,6 +298,11 @@ def parse_ascii_diagram_to_mermaid(lines):
     cleaned_lines = [l.strip() for l in lines if l.strip()]
     if not cleaned_lines:
         return False, ""
+    # 0. Vertical math addition chains are sequence-network graphs with
+    # '+' as the series connector; render as an undirected chain.
+    is_math, math_code = math_chain_to_mermaid(cleaned_lines)
+    if is_math:
+        return True, math_code
 
     # 1. Linear sequence pipeline check (e.g., "G | T1 | LINE | T2 | M" or "A -> B -> C")
     if len(cleaned_lines) == 1:
@@ -320,7 +375,7 @@ def parse_ascii_diagram_to_mermaid(lines):
         m_tree = tree_branch_prefix.match(raw)
         is_tree_branch = bool(m_tree or raw.startswith("| ") or raw.startswith("|-") or raw.startswith("L-") or raw.startswith("L_"))
 
-        lbl = clean_label(raw)
+        lbl = recover_numeric_misread(clean_label(raw))
         if not lbl:
             i += 1
             continue
@@ -372,8 +427,13 @@ def parse_ascii_diagram_to_mermaid(lines):
     out = ["flowchart TD"]
     for nid, lbl in nodes:
         out.append(f'    {nid}["{lbl}"]')
+    trunk_only = all(not (m or raw.startswith("| ") or raw.startswith("|-")
+                          or raw.startswith("L-") or raw.startswith("L_"))
+                     for raw in cleaned_lines
+                     for m in [tree_branch_prefix.match(raw)])
+    edge = "---" if trunk_only else "-->"
     for f, t in edges:
-        out.append(f"    {f} --> {t}")
+        out.append(f"    {f} {edge} {t}")
 
     return True, "\n".join(out)
 
@@ -709,7 +769,13 @@ def find_boxes(dark, min_w_frac=BOX_MIN_W_FRAC, min_h=BOX_MIN_H, max_gap=BOX_MAX
         if e - s < W * 0.35:
             continue
         for y2, s2, e2 in stitched:
-            if y2 - y > min_h and abs(s2 - s) < BOX_TOLERANCE_PX and abs(e2 - e) < BOX_TOLERANCE_PX:
+            if y2 - y > min_h and abs(y2 - y) < H:
+                # Pair borders by horizontal overlap rather than exact
+                # endpoint equality: skewed or corner-eroded scans shift
+                # the detected segment ends between top and bottom.
+                overlap = max(0, min(e, e2) - max(s, s2))
+                if overlap < 0.5 * min(e - s, e2 - s2):
+                    continue
                 box_s = min(s, s2)
                 box_e = max(e, e2)
                 lv = check_vstrip_continuous(dark, y, y2, box_s)
@@ -724,6 +790,103 @@ def find_boxes(dark, min_w_frac=BOX_MIN_W_FRAC, min_h=BOX_MIN_H, max_gap=BOX_MAX
                    b[2] >= f[2] - 10 and b[3] <= f[3] + 10 for f in final):
             final.append(b)
     return final
+
+
+OPEN_BOX_PAGE_EDGE = 40
+
+
+def find_open_boxes(dark, boxes, min_w_frac=BOX_MIN_W_FRAC, max_gap=BOX_MAX_GAP):
+    """Detect code-box regions cut off by the page boundary: a top border
+    near the bottom page edge with no closing bottom border (open-bottom),
+    or a bottom border near the top page edge with no opening top border
+    (open-top). Returns open-bottom and open-top region lists of
+    (y0, y1, x0, x1) tuples."""
+    H, W = dark.shape
+
+    def hline_runs(y):
+        row = dark[y]
+        runs = []
+        x = 0
+        while x < W:
+            if row[x]:
+                s = x
+                while x < W:
+                    if row[x]:
+                        x += 1
+                    else:
+                        gap = 1
+                        while gap <= max_gap and x + gap < W and not row[x + gap]:
+                            gap += 1
+                        if gap <= max_gap and x + gap < W and row[x + gap]:
+                            x += gap
+                        else:
+                            break
+                if x - s > W * min_w_frac:
+                    runs.append((s, x))
+            else:
+                x += 1
+        return runs
+
+    def seg_yse():
+        segs = []
+        for y in range(0, H, 2):
+            for s, e in hline_runs(y):
+                segs.append((y, s, e))
+        return segs
+
+    segs = seg_yse()
+    if not segs:
+        return [], []
+
+    # cluster segments into horizontal border lines
+    merged = []
+    used = [False] * len(segs)
+    segs.sort()
+    for i, (y, s, e) in enumerate(segs):
+        if used[i]:
+            continue
+        ys = [y]
+        s0, e0 = s, e
+        used[i] = True
+        for j in range(i + 1, len(segs)):
+            if used[j]:
+                continue
+            y2, s2, e2 = segs[j]
+            if y2 <= max(ys) + 8:
+                overlap = max(0, min(e0, e2) - max(s0, s2))
+                adjacent = (abs(s2 - e0) <= 25 or abs(s0 - e2) <= 25)
+                if overlap > 0 or adjacent:
+                    used[j] = True
+                    ys.append(y2)
+                    s0 = min(s0, s2)
+                    e0 = max(e0, e2)
+        merged.append((sum(ys) / len(ys), s0, e0))
+
+    open_bottom = []
+    open_top = []
+    for y, s, e in merged:
+        # open-bottom: border near the bottom edge, not already a full box
+        if y > H - OPEN_BOX_PAGE_EDGE - 60 and y < H - 4:
+            if any(abs(y - b[1]) < 20 and abs(s - b[2]) < BOX_TOLERANCE_PX for b in boxes):
+                continue
+            open_bottom.append((y, H - 4, s, e))
+        # open-top: border near the top edge
+        if y < OPEN_BOX_PAGE_EDGE + 60 and y > 4:
+            if any(abs(y - b[0]) < 20 and abs(s - b[2]) < BOX_TOLERANCE_PX for b in boxes):
+                continue
+            open_top.append((4, y, s, e))
+
+    # require side borders so we don't mistake a page-wide rule for a box
+    def has_sides(y0, y1, x0, x1):
+        span = y1 - y0
+        if span < 30:
+            return False
+        return (check_vstrip_continuous(dark, y0, y1, x0)
+                and check_vstrip_continuous(dark, y0, y1, x1))
+
+    open_bottom = [b for b in open_bottom if has_sides(*b)]
+    open_top = [b for b in open_top if has_sides(*b)]
+    return open_bottom, open_top
 
 
 def ocr_region(img, lang, config):
@@ -749,8 +912,9 @@ def process_page_regions(page, dpi, lang):
     img = Image.open(io.BytesIO(pix.tobytes("png")))
     dark = numpy.array(img) < 128
     boxes = find_boxes(dark)
+    open_bottom, open_top = find_open_boxes(dark, boxes)
     results = []
-    for y0, y1, x0, x1 in boxes:
+    for y0, y1, x0, x1 in boxes + open_bottom + open_top:
         crop = img.crop((x0 + BOX_BORDER_PAD, y0 + BOX_BORDER_PAD,
                          x1 - BOX_BORDER_PAD, y1 - BOX_BORDER_PAD))
         text = ocr_region(crop, lang, "--psm 6")
@@ -783,23 +947,58 @@ def ocr_masked_page(img, box_results, dpi, lang):
 
 def clean_box_text(text):
     """Normalize a box's OCR text: strip gutter numbers at line starts,
-    preserve code indentation, drop empty lines, and remove bare
-    gutter-number lines (code lines whose text OCR failed to see)."""
+    preserve code indentation, and drop empty lines.
+
+    Bare-number handling: OCR sometimes emits only the gutter number for
+    a code line whose text it failed to read (e.g. a lone '3'). Such a
+    line is dropped ONLY when its value equals the gutter position it
+    came from on its own line (a true gutter-of-an-empty-line), or when
+    it is a standalone line whose value continues the gutter sequence
+    while the following gutter skips (a duplicated gutter read). A bare
+    number that survives (e.g. '71' from '3 71', an OCR misread of 'T1')
+    is real content and is kept.
+    """
+    raw_lines = text.splitlines()
     out = []
-    for raw in text.splitlines():
+    prev_gutter = None
+    for raw in raw_lines:
         if not raw.strip():
             continue
         m = re.match(r"^\s*(\d{1,3})[.)]?[ \t](.*)$", raw)
         if m:
+            gutter = int(m.group(1))
             line = m.group(2).rstrip()
         else:
+            gutter = None
             line = raw.strip()
-        # A bare number is a gutter line for an empty/unread code line.
-        if re.fullmatch(r"\d{1,3}[.)]?", line):
-            continue
-        # OCR sometimes glues a bare number from the next gutter line onto
-        # the end of content (e.g. 'pass3', '}5'). Split it off when the
-        # preceding text is not itself numeric.
+
+        if line and re.fullmatch(r"\d{1,3}[.)]?", line):
+            num = int(line.rstrip(".)"))
+            if gutter is not None and num == gutter:
+                # OCR emitted the gutter number itself as the line text:
+                # this is a gutter for an empty/unread code line.
+                prev_gutter = gutter
+                continue
+            if gutter is None:
+                # A standalone bare-number line is an OCR ghost of a
+                # gutter read for an empty/unread code line; drop it.
+                continue
+        if gutter is not None:
+            prev_gutter = gutter
+
+        # OCR sometimes reads a lone closing brace (with its gutter
+        # number) as two-letter noise: '8 }' -> 'ae', '13 }' -> 'fe'.
+        if re.fullmatch(r"(ae|fe|ce|ee|oe)", line):
+            line = "}"
+        m4 = re.fullmatch(r"(?:ae|fe|ce|ee|oe)\s+([})\]])", line)
+        if m4:
+            line = m4.group(1)
+        line = re.sub(r"^\+\s*([})\]])", r"\1", line)
+        m3 = re.match(r"^(.*[\w\"'\)\]])(?:ae|fe|ce|ee|oe)$", line)
+        if m3:
+            line = m3.group(1).rstrip()
+            if not line.endswith("}"):
+                line += "}"
         m2 = re.match(r"^(.*\S)(\s*)(\d{1,2})$", line)
         if m2:
             stem = m2.group(1)
@@ -841,6 +1040,51 @@ def merge_regions(prose_lines, box_results, dpi, lang, use_mermaid=True):
     return "\n\n".join(e[3] for e in events)
 
 
+
+BOX_CONT_X_OVERLAP = 0.6
+BOX_CONT_GUTTER_GAP = 3
+
+
+def box_gutter_range(text):
+    """Extract the min and max leading gutter numbers from box OCR text."""
+    nums = []
+    for raw in text.splitlines():
+        m = re.match(r"^\s*(\d{1,3})[.)]?[ \t]", raw)
+        if m:
+            nums.append(int(m.group(1)))
+    return (min(nums), max(nums)) if nums else None
+
+
+def boxes_continuing(prev_page_state, box_results):
+    """Split box_results into (continuations, standalone) based on the
+    previous page's state. A box continues the previous page's last
+    bottom box when their x-extents overlap strongly and the gutter
+    numbers follow (or the previous box ended near the page bottom)."""
+    if not prev_page_state or not box_results:
+        return [], box_results
+    prev_box, prev_text, prev_bottom, prev_h = prev_page_state
+    prev_gut = box_gutter_range(prev_text)
+    cont, rest = [], []
+    for box, text in box_results:
+        y0, y1, x0, x1 = box
+        x_overlap = max(0, min(x1, prev_box[3]) - max(x0, prev_box[2]))
+        if x_overlap < BOX_CONT_X_OVERLAP * min(x1 - x0, prev_box[3] - prev_box[2]):
+            rest.append((box, text))
+            continue
+        # prefer the topmost candidate box on the next page
+        if y0 > prev_h * 0.4:
+            rest.append((box, text))
+            continue
+        gut = box_gutter_range(text)
+        if prev_gut and gut and gut[0] > prev_gut[1] and gut[0] - prev_gut[1] <= BOX_CONT_GUTTER_GAP + 1:
+            cont.append((box, text))
+            continue
+        if prev_bottom and gut is None and prev_gut is None:
+            cont.append((box, text))
+            continue
+        rest.append((box, text))
+    return cont, rest
+
 def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_mermaid=True):
     if not os.path.isfile(pdf_path):
         sys.exit(f"File not found: {pdf_path}")
@@ -850,32 +1094,101 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
         sys.exit(f"Cannot open PDF: {e}")
 
     parts = [f"# {os.path.splitext(os.path.basename(pdf_path))[0]}", ""]
+    open_fence = None       # (tag, [lines]) of a fenced block awaiting continuation
+    prev_page_state = None  # (box, text, near_bottom, page_h)
+
     for pno, page in enumerate(doc, start=1):
         print(f"Processing page {pno}/{len(doc)}...", file=sys.stderr)
         used_text_layer = False
+        lines = []
         if prefer_text_layer:
             lines = lines_from_text_layer(page)
             if sum(len(l["text"]) for l in lines) >= MIN_TEXT_CHARS:
                 used_text_layer = True
             else:
                 lines = []
-        src = "text layer" if used_text_layer else "OCR"
+
+        text = ""
+        box_results = []
+        all_boxes = []
+        page_h = 0
         if not used_text_layer:
-            img, box_results = process_page_regions(page, dpi, lang)
+            img, all_boxes = process_page_regions(page, dpi, lang)
+            page_h = img.size[1]
+            cont, standalone = boxes_continuing(prev_page_state, all_boxes)
+            if cont and open_fence is not None:
+                tag, buf, fence_part_idx, fence_span = open_fence
+                for _, t in cont:
+                    buf.append(clean_box_text(t))
+                merged = "\n".join(buf)
+                # Re-render the merged block with the same logic used for
+                # a fresh box: try Mermaid synthesis first, then language
+                # tagging.
+                fence = None
+                if use_mermaid and tag in ("", "mermaid"):
+                    is_diag, mermaid_code = parse_ascii_diagram_to_mermaid(merged.splitlines())
+                    if is_diag:
+                        fence = "```mermaid\n" + mermaid_code + "\n```"
+                if fence is None:
+                    new_tag = estimate_code_language(merged) or tag
+                    fence = f"```{new_tag}\n{merged}\n```"
+                page_text = parts[fence_part_idx]
+                s, e = fence_span
+                parts[fence_part_idx] = page_text[:s] + fence + page_text[e:]
+                open_fence = None
+            box_results = standalone
+            if all_boxes:
+                # Mask every detected box (continuations included) so the
+                # prose pass cannot re-read consumed continuation content.
+                prose_lines = ocr_masked_page(img, all_boxes, dpi, lang)
+            else:
+                prose_lines = []
             if box_results:
-                src = "OCR + box regions"
-                prose_lines = ocr_masked_page(img, box_results, dpi, lang)
                 text = merge_regions(prose_lines, box_results, dpi, lang, use_mermaid=use_mermaid)
+            elif all_boxes:
+                # Every box was consumed as a continuation; the prose pass
+                # still used the masked image, so just render its lines.
+                text = page_to_markdown(prose_lines, use_mermaid=use_mermaid)
             else:
                 lines = lines_from_ocr(ocr_page(page, dpi, lang))
                 text = page_to_markdown(lines, use_mermaid=use_mermaid)
+            # Track the page's bottom-most box as a continuation source
+            # only when it sits near the page bottom (i.e. split mid-box).
+            bottom_continues = False
+            raw_bottom_text = ""
+            if all_boxes:
+                bottom = max(all_boxes, key=lambda r: r[0][1])
+                bottom_continues = bottom[0][1] > page_h * 0.75
+                raw_bottom_text = clean_box_text(bottom[1])
+                prev_page_state = (bottom[0], bottom[1],
+                                   bottom_continues, page_h)
+            else:
+                prev_page_state = None
         else:
+            prev_page_state = None
             text = page_to_markdown(lines, use_mermaid=use_mermaid)
+
+        src = ("text layer" if used_text_layer
+               else ("OCR + box regions" if all_boxes else "OCR"))
         parts.append(f"<!-- page {pno} ({src}) -->\n")
         if text:
             parts.append(text)
         else:
             parts.append("*(no text detected on this page)*")
+
+        # If the bottom-most box of this page ended near the page bottom,
+        # keep its RAW cleaned text so a matching continuation box on the
+        # next page can be merged and the pair re-rendered together.
+        open_fence = None
+        if (not used_text_layer and prev_page_state and prev_page_state[2]
+                and text and bottom_continues):
+            m = None
+            for m in re.finditer(r"```(\w*)\n(.*?)\n```", text, re.DOTALL):
+                pass
+            if m and m.end() >= len(text) - 4:
+                open_fence = ("", [raw_bottom_text],
+                              len(parts) - 1, (m.start(), m.end()))
+
         if save_images:
             img_path = os.path.join(save_images, f"page-{pno:04d}.png")
             os.makedirs(save_images, exist_ok=True)
@@ -883,6 +1196,7 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
                 f.write(render_page(page, dpi))
             parts.append(f"\n![page {pno}]({img_path})")
         parts.append("")
+
     doc.close()
 
     markdown = "\n".join(parts)

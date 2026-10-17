@@ -12,6 +12,9 @@ from pdf2md import (
     estimate_code_language,
     parse_ascii_diagram_to_mermaid,
     clean_box_text,
+    box_gutter_range,
+    boxes_continuing,
+    recover_numeric_misread,
     detect_gutters,
     looks_like_list,
     looks_like_code,
@@ -95,7 +98,9 @@ class TestMermaidDiagramConversion(unittest.TestCase):
         self.assertIn('EngineeringFigureExtension', mermaid)
         self.assertIn('Electrical SLD', mermaid)
 
-    def test_math_chain_not_diagram(self):
+    def test_math_chain_becomes_network_graph(self):
+        # Sequence-network math chains ('+' as series connector) are
+        # network graphs and should render as an undirected Mermaid chain.
         math = [
             "X2(G)",
             "+",
@@ -107,8 +112,16 @@ class TestMermaidDiagramConversion(unittest.TestCase):
             "+",
             "X2(M)",
         ]
-        ok, _ = parse_ascii_diagram_to_mermaid(math)
-        self.assertFalse(ok)
+        ok, code = parse_ascii_diagram_to_mermaid(math)
+        self.assertTrue(ok)
+        self.assertIn("flowchart TD", code)
+        self.assertIn("---", code)
+        self.assertIn("XT1", code)
+        self.assertIn("X2(M)", code)
+        # Balanced equation-like content must NOT be treated as a chain.
+        not_chain = ["a = b", "+ c", "= d"]
+        ok2, _ = parse_ascii_diagram_to_mermaid(not_chain)
+        self.assertFalse(ok2)
 
     def test_bullet_list_not_diagram(self):
         bullet_text = [
@@ -133,6 +146,37 @@ class TestLayoutHeuristics(unittest.TestCase):
         box_ocr = "13 class Breaker:\n\n14 pass\n\n3\n"
         cleaned = clean_box_text(box_ocr)
         self.assertEqual(cleaned, "class Breaker:\npass")
+
+    def test_clean_box_text_keeps_numeric_content(self):
+        # '3 71' is a gutter line whose content '71' is an OCR misread of
+        # 'T1' (recovered later by the diagram parser); it must be kept.
+        box_ocr = "1 G\n\n2. |\n\n3 71\n\n4 |\n\n5 LINE\n"
+        cleaned = clean_box_text(box_ocr)
+        self.assertIn("71", cleaned)
+
+    def test_numeric_misread_recovery(self):
+        self.assertEqual(recover_numeric_misread("71"), "T1")
+        self.assertEqual(recover_numeric_misread("72"), "T2")
+        self.assertEqual(recover_numeric_misread("LINE"), "LINE")
+        self.assertEqual(recover_numeric_misread("13"), "T3")
+
+    def test_chain_diagram_recovers_transformers(self):
+        chain = ["G", "|", "71", "|", "LINE", "|", "72", "|", "M"]
+        ok, code = parse_ascii_diagram_to_mermaid(chain)
+        self.assertTrue(ok)
+        self.assertIn("T1", code)
+        self.assertIn("T2", code)
+        self.assertIn("---", code)
+
+    def test_clean_box_text_brace_misreads(self):
+        # OCR frequently reads a lone closing brace (with its gutter
+        # number) as two-letter noise.
+        self.assertEqual(clean_box_text("1 Transformer (\n7 Z_pu=@.10\n\nae"),
+                         "Transformer (\nZ_pu=@.10\n}")
+        self.assertEqual(clean_box_text("fe }"), "}")
+        self.assertEqual(clean_box_text("ae }"), "}")
+        self.assertEqual(clean_box_text("ae"), "}")
+        self.assertEqual(clean_box_text('2 name="T1",'), 'name="T1",')
 
     def test_clean_box_text_glued_closing_brace(self):
         box_ocr = "7 \"kv\": 13.8\n\n8 }5\n"
@@ -171,6 +215,43 @@ class TestLayoutHeuristics(unittest.TestCase):
         self.assertIn("Detect diagram region", texts)
         self.assertIn("Send crop to VLM", texts)
         self.assertNotIn("Pp", texts)
+
+
+class TestCrossPageContinuation(unittest.TestCase):
+    def test_box_gutter_range(self):
+        text = "9 {\n\n10 \"id\": \"T1\",\n\n22 }\n"
+        self.assertEqual(box_gutter_range(text), (9, 22))
+
+    def test_box_gutter_range_none(self):
+        self.assertIsNone(box_gutter_range("no numbers here\n"))
+
+    def test_continuation_by_gutter_sequence(self):
+        prev_state = ((2403, 2922, 413, 2131), "7 \"kv\": 13.8\n8 }", True, 3300)
+        boxes = [((317, 1226, 420, 2150), "9 {\n10 \"id\": \"T1\","),
+                 ((1619, 1685, 422, 2140), "1 import networkx as nx")]
+        cont, rest = boxes_continuing(prev_state, boxes)
+        self.assertEqual(len(cont), 1)
+        self.assertEqual(cont[0][0], (317, 1226, 420, 2150))
+        self.assertEqual(len(rest), 1)
+
+    def test_no_continuation_when_gutter_restarts(self):
+        prev_state = ((2403, 2922, 413, 2131), "7 \"kv\": 13.8\n8 }", False, 3300)
+        boxes = [((317, 1226, 420, 2150), "1 {\n2 \"id\": \"G\",")]
+        cont, rest = boxes_continuing(prev_state, boxes)
+        self.assertEqual(cont, [])
+        self.assertEqual(len(rest), 1)
+
+    def test_no_continuation_x_mismatch(self):
+        prev_state = ((100, 200, 413, 700), "7 x\n8 y", True, 3300)
+        boxes = [((317, 1226, 1500, 2150), "9 {\n10 \"id\": \"T1\",")]
+        cont, rest = boxes_continuing(prev_state, boxes)
+        self.assertEqual(cont, [])
+
+    def test_no_state_no_continuation(self):
+        boxes = [((317, 1226, 420, 2150), "9 {\n10 \"id\": \"T1\",")]
+        cont, rest = boxes_continuing(None, boxes)
+        self.assertEqual(cont, [])
+        self.assertEqual(rest, boxes)
 
 
 if __name__ == "__main__":

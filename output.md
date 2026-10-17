@@ -91,16 +91,11 @@ Expected result:
 "rating mva": 102,
 "kv": 13.8
 }
-```
-
-<!-- page 3 (OCR + box regions) -->
-
-```json
 {
 "id": "T1",
 "type": "transformer", |
 "connection": "delta-grounded_wye" |
-fe }
+}
 ],
 "connections": [
 re", "r1"4,
@@ -108,8 +103,10 @@ re", "r1"4,
 ["LINE","T2"],
 ["T2","M"]
 ]
-+}
+}
 ```
+
+<!-- page 3 (OCR + box regions) -->
 
 Stage 3: Python Engineering Plugin This is where the real value lives.
 
@@ -124,36 +121,48 @@ Build:
 ```mermaid
 flowchart TD
     G_1["G"]
-    LINE_2["LINE"]
-    M_3["M"]
-    G_1 --> LINE_2
-    LINE_2 --> M_3
+    T1_2["T1"]
+    LINE_3["LINE"]
+    T2_4["T2"]
+    M_5["M"]
+    G_1 --- T1_2
+    T1_2 --- LINE_3
+    LINE_3 --- T2_4
+    T2_4 --- M_5
 ```
 
 Then automatically derive:
 
 Positive Sequence Network
 
-<!-- page 4 (OCR + box regions) -->
+```mermaid
+flowchart TD
+    N1["Xs(G)"]
+    N2["XT1"]
+    N3["XLINE"]
+    N4["XT2"]
+    N5["Xs(M)"]
+    N1 --- N2
+    N2 --- N3
+    N3 --- N4
+    N4 --- N5
+```
 
-```
-XT2
-+
-Xs(M)
-```
+<!-- page 4 (OCR + box regions) -->
 
 Negative Sequence Network
 
-```
-X2(G)
-+
-XT1
-+
-XLINE
-+
-XT2
-+
-X2(M)
+```mermaid
+flowchart TD
+    N1["X2(G)"]
+    N2["XT1"]
+    N3["XLINE"]
+    N4["XT2"]
+    N5["X2(M)"]
+    N1 --- N2
+    N2 --- N3
+    N3 --- N4
+    N4 --- N5
 ```
 
 Zero Sequence Network Apply transformer rules:
@@ -174,11 +183,6 @@ An Even Better Approach i'd represent everything in a domain model rather than p
 ```python
 class Generator:
 pass
-```
-
-<!-- page 5 (OCR + box regions) -->
-
-```python
 class Transformer:
 pass
 class TransmissionLine:
@@ -190,11 +194,13 @@ class Breaker:
 pass
 ```
 
+<!-- page 5 (OCR + box regions) -->
+
 Then the vision output simply fills these objects.
 
 Example:
 
-```python
+```
 Transformer (
 name="T1",
 rating mva=100,
@@ -202,7 +208,7 @@ primary_kv=13.8,
 secondary_kv=138,
 vector_group="Dyg",
 Z_pu=@.10
-ae
+}
 ```
 
 Now downstream modules can:
@@ -224,22 +230,20 @@ flowchart TD
     EngineeringF_2["EngineeringFigureExtension"]
     ElectricalSL_3["Electrical SLD"]
     ProtectionSc_4["Protection Scheme"]
+    PID_5["P&ID"]
+    CivilDrawing_6["Civil Drawing"]
+    MechanicalAs_7["Mechanical Assembly"]
+    ControlNarra_8["Control Narrative"]
     Docling_1 --> EngineeringF_2
     EngineeringF_2 --> ElectricalSL_3
     EngineeringF_2 --> ProtectionSc_4
+    ProtectionSc_4 --> PID_5
+    Docling_1 --> CivilDrawing_6
+    CivilDrawing_6 --> MechanicalAs_7
+    ElectricalSL_3 --> ControlNarra_8
 ```
 
 <!-- page 6 (OCR + box regions) -->
-
-```mermaid
-flowchart TD
-    PID_1["P&ID"]
-    CivilDrawing_2["Civil Drawing"]
-    MechanicalAs_3["Mechanical Assembly"]
-    ControlNarra_4["Control Narrative"]
-    CivilDrawing_2 --> MechanicalAs_3
-    CivilDrawing_2 --> ControlNarra_4
-```
 
 For electrical SLDs specifically:
 
