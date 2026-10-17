@@ -121,42 +121,48 @@ Build:
 ```mermaid
 flowchart TD
     G_1["G"]
-    LINE_2["LINE"]
-    M_3["M"]
-    G_1 --> LINE_2
-    LINE_2 --> M_3
+    T1_2["T1"]
+    LINE_3["LINE"]
+    T2_4["T2"]
+    M_5["M"]
+    G_1 --- T1_2
+    T1_2 --- LINE_3
+    LINE_3 --- T2_4
+    T2_4 --- M_5
 ```
 
 Then automatically derive:
 
 Positive Sequence Network
 
-```
-Xs(G)
-+
-XT1
-+
- XLINE
-+
-XT2
-+
-Xs(M)
+```mermaid
+flowchart TD
+    N1["Xs(G)"]
+    N2["XT1"]
+    N3["XLINE"]
+    N4["XT2"]
+    N5["Xs(M)"]
+    N1 --- N2
+    N2 --- N3
+    N3 --- N4
+    N4 --- N5
 ```
 
 <!-- page 4 (OCR + box regions) -->
 
 Negative Sequence Network
 
-```
-X2(G)
-+
-XT1
-+
-XLINE
-+
-XT2
-+
-X2(M)
+```mermaid
+flowchart TD
+    N1["X2(G)"]
+    N2["XT1"]
+    N3["XLINE"]
+    N4["XT2"]
+    N5["X2(M)"]
+    N1 --- N2
+    N2 --- N3
+    N3 --- N4
+    N4 --- N5
 ```
 
 Zero Sequence Network Apply transformer rules:

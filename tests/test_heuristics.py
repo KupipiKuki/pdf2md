@@ -14,6 +14,7 @@ from pdf2md import (
     clean_box_text,
     box_gutter_range,
     boxes_continuing,
+    recover_numeric_misread,
     detect_gutters,
     looks_like_list,
     looks_like_code,
@@ -97,7 +98,9 @@ class TestMermaidDiagramConversion(unittest.TestCase):
         self.assertIn('EngineeringFigureExtension', mermaid)
         self.assertIn('Electrical SLD', mermaid)
 
-    def test_math_chain_not_diagram(self):
+    def test_math_chain_becomes_network_graph(self):
+        # Sequence-network math chains ('+' as series connector) are
+        # network graphs and should render as an undirected Mermaid chain.
         math = [
             "X2(G)",
             "+",
@@ -109,8 +112,16 @@ class TestMermaidDiagramConversion(unittest.TestCase):
             "+",
             "X2(M)",
         ]
-        ok, _ = parse_ascii_diagram_to_mermaid(math)
-        self.assertFalse(ok)
+        ok, code = parse_ascii_diagram_to_mermaid(math)
+        self.assertTrue(ok)
+        self.assertIn("flowchart TD", code)
+        self.assertIn("---", code)
+        self.assertIn("XT1", code)
+        self.assertIn("X2(M)", code)
+        # Balanced equation-like content must NOT be treated as a chain.
+        not_chain = ["a = b", "+ c", "= d"]
+        ok2, _ = parse_ascii_diagram_to_mermaid(not_chain)
+        self.assertFalse(ok2)
 
     def test_bullet_list_not_diagram(self):
         bullet_text = [
@@ -135,6 +146,27 @@ class TestLayoutHeuristics(unittest.TestCase):
         box_ocr = "13 class Breaker:\n\n14 pass\n\n3\n"
         cleaned = clean_box_text(box_ocr)
         self.assertEqual(cleaned, "class Breaker:\npass")
+
+    def test_clean_box_text_keeps_numeric_content(self):
+        # '3 71' is a gutter line whose content '71' is an OCR misread of
+        # 'T1' (recovered later by the diagram parser); it must be kept.
+        box_ocr = "1 G\n\n2. |\n\n3 71\n\n4 |\n\n5 LINE\n"
+        cleaned = clean_box_text(box_ocr)
+        self.assertIn("71", cleaned)
+
+    def test_numeric_misread_recovery(self):
+        self.assertEqual(recover_numeric_misread("71"), "T1")
+        self.assertEqual(recover_numeric_misread("72"), "T2")
+        self.assertEqual(recover_numeric_misread("LINE"), "LINE")
+        self.assertEqual(recover_numeric_misread("13"), "T3")
+
+    def test_chain_diagram_recovers_transformers(self):
+        chain = ["G", "|", "71", "|", "LINE", "|", "72", "|", "M"]
+        ok, code = parse_ascii_diagram_to_mermaid(chain)
+        self.assertTrue(ok)
+        self.assertIn("T1", code)
+        self.assertIn("T2", code)
+        self.assertIn("---", code)
 
     def test_clean_box_text_brace_misreads(self):
         # OCR frequently reads a lone closing brace (with its gutter

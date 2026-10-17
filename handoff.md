@@ -161,6 +161,33 @@ User-observed issues after the audit merge, all fixed:
   plus brace-misread repairs (suite: 24 tests, all passing)
   (suite: 23 tests, all passing); smoke test passing.
 
+## 3d. Reference-Output Pass (network graphs and misread recovery)
+
+Driven by `ref_output.md` (user-curated example of expected
+post-processing):
+
+- **Math addition chains are network graphs.** `Xs(G) / + / XT1 / ...`
+  sequence-network chains use '+' as the series connector. They now
+  render as undirected Mermaid chains (`---`), matching the reference.
+  The old test asserting math chains must NOT become diagrams was
+  inverted accordingly.
+- **Numeric misread recovery in chain diagrams.** The G/T1/LINE/T2/M
+  network chain's OCR reads 'T1'/'T2' as '71'/'72'.
+  `recover_numeric_misread` maps bare `[17]\\d` tokens in diagram
+  labels back to `T<digit>`, restoring both transformers.
+- **Bare-number rule refined in `clean_box_text`.** A stripped number
+  is kept when it is real content ('3 71' -> '71' kept for the diagram
+  parser); standalone bare-number ghost lines are still dropped.
+- **Undirected edges for network chains.** Vertical trunk diagrams
+  (no branch markers) emit `---` instead of `-->`, per the reference
+  (connectivity, not flow direction).
+- Not automatable from OCR alone (requires domain knowledge or a VLM,
+  per the user's reference): the Proposed Pipeline's parallel branch
+  fan-in (Photograph/Plot/schematic/P&ID/SLD -> Vision Model), heading
+  levels (`###`), bold emphasis, `---` separators, and code-block
+  indentation. The script emits the faithful raw version; these remain
+  deliberate post-processing steps.
+
 ## 4. Branch & Git History
 
 - **Branch Name:** `vibe/mermaid-lang-detect-and-optimizations`

@@ -240,6 +240,56 @@ def estimate_code_language(code):
     return ""
 
 
+MATH_TOKEN_RE = re.compile(r"^[XYZ](?:[T_]?\w+)?\s*\(?[\w,.\s]*\)?$", re.IGNORECASE)
+
+
+def math_chain_to_mermaid(lines):
+    """Convert vertical math addition chains (Xs(G) / + / XT1 / + ...)
+    into an undirected Mermaid chain. Sequence-network diagrams in this
+    domain use '+' as the series connector; the graph they represent is
+    a chain of reactances. Returns (is_math_chain, mermaid_code)."""
+    if isinstance(lines, str):
+        lines = lines.splitlines()
+    cleaned = [l.strip() for l in lines if l.strip()]
+    if len(cleaned) < 5:
+        return False, ""
+    tokens = []
+    expect_plus = False
+    for l in cleaned:
+        if l == "+":
+            if not tokens:
+                return False, ""
+            expect_plus = False
+            continue
+        if expect_plus:
+            return False, ""
+        if not MATH_TOKEN_RE.match(l):
+            return False, ""
+        tokens.append(l)
+        expect_plus = True
+    if len(tokens) < 3:
+        return False, ""
+    out = ["flowchart TD"]
+    ids = []
+    for i, t in enumerate(tokens):
+        nid = f"N{i+1}"
+        ids.append(nid)
+        out.append(f'    {nid}["{t}"]')
+    for a, b in zip(ids, ids[1:]):
+        out.append(f"    {a} --- {b}")
+    return True, "\n".join(out)
+
+
+def recover_numeric_misread(label):
+    """OCR often reads 'T1'/'T2' as '71'/'72' inside vertical network
+    chain diagrams. Restore 'T<digit>' for bare two-digit tokens starting
+    with 7 or 1 in a chain context."""
+    s = label.strip()
+    if re.fullmatch(r"[17]\d", s):
+        return f"T{s[1]}"
+    return label
+
+
 def parse_ascii_diagram_to_mermaid(lines):
     """Attempt to parse an ASCII flow chart, tree diagram, or linear pipeline into Mermaid.
     Returns (is_diagram: bool, mermaid_code: str)."""
@@ -248,6 +298,11 @@ def parse_ascii_diagram_to_mermaid(lines):
     cleaned_lines = [l.strip() for l in lines if l.strip()]
     if not cleaned_lines:
         return False, ""
+    # 0. Vertical math addition chains are sequence-network graphs with
+    # '+' as the series connector; render as an undirected chain.
+    is_math, math_code = math_chain_to_mermaid(cleaned_lines)
+    if is_math:
+        return True, math_code
 
     # 1. Linear sequence pipeline check (e.g., "G | T1 | LINE | T2 | M" or "A -> B -> C")
     if len(cleaned_lines) == 1:
@@ -320,7 +375,7 @@ def parse_ascii_diagram_to_mermaid(lines):
         m_tree = tree_branch_prefix.match(raw)
         is_tree_branch = bool(m_tree or raw.startswith("| ") or raw.startswith("|-") or raw.startswith("L-") or raw.startswith("L_"))
 
-        lbl = clean_label(raw)
+        lbl = recover_numeric_misread(clean_label(raw))
         if not lbl:
             i += 1
             continue
@@ -372,8 +427,13 @@ def parse_ascii_diagram_to_mermaid(lines):
     out = ["flowchart TD"]
     for nid, lbl in nodes:
         out.append(f'    {nid}["{lbl}"]')
+    trunk_only = all(not (m or raw.startswith("| ") or raw.startswith("|-")
+                          or raw.startswith("L-") or raw.startswith("L_"))
+                     for raw in cleaned_lines
+                     for m in [tree_branch_prefix.match(raw)])
+    edge = "---" if trunk_only else "-->"
     for f, t in edges:
-        out.append(f"    {f} --> {t}")
+        out.append(f"    {f} {edge} {t}")
 
     return True, "\n".join(out)
 
@@ -887,47 +947,63 @@ def ocr_masked_page(img, box_results, dpi, lang):
 
 def clean_box_text(text):
     """Normalize a box's OCR text: strip gutter numbers at line starts,
-    preserve code indentation, drop empty lines, and remove bare
-    gutter-number lines (code lines whose text OCR failed to see)."""
+    preserve code indentation, and drop empty lines.
+
+    Bare-number handling: OCR sometimes emits only the gutter number for
+    a code line whose text it failed to read (e.g. a lone '3'). Such a
+    line is dropped ONLY when its value equals the gutter position it
+    came from on its own line (a true gutter-of-an-empty-line), or when
+    it is a standalone line whose value continues the gutter sequence
+    while the following gutter skips (a duplicated gutter read). A bare
+    number that survives (e.g. '71' from '3 71', an OCR misread of 'T1')
+    is real content and is kept.
+    """
+    raw_lines = text.splitlines()
     out = []
-    for raw in text.splitlines():
+    prev_gutter = None
+    for raw in raw_lines:
         if not raw.strip():
             continue
         m = re.match(r"^\s*(\d{1,3})[.)]?[ \t](.*)$", raw)
         if m:
+            gutter = int(m.group(1))
             line = m.group(2).rstrip()
         else:
+            gutter = None
             line = raw.strip()
-        # A bare number is a gutter line for an empty/unread code line.
-        if re.fullmatch(r"\d{1,3}[.)]?", line):
-            continue
-        # OCR sometimes glues a bare number from the next gutter line onto
-        # the end of content (e.g. 'pass3', '}5'). Split it off when the
-        # preceding text is not itself numeric.
+
+        if line and re.fullmatch(r"\d{1,3}[.)]?", line):
+            num = int(line.rstrip(".)"))
+            if gutter is not None and num == gutter:
+                # OCR emitted the gutter number itself as the line text:
+                # this is a gutter for an empty/unread code line.
+                prev_gutter = gutter
+                continue
+            if gutter is None:
+                # A standalone bare-number line is an OCR ghost of a
+                # gutter read for an empty/unread code line; drop it.
+                continue
+        if gutter is not None:
+            prev_gutter = gutter
+
+        # OCR sometimes reads a lone closing brace (with its gutter
+        # number) as two-letter noise: '8 }' -> 'ae', '13 }' -> 'fe'.
+        if re.fullmatch(r"(ae|fe|ce|ee|oe)", line):
+            line = "}"
+        m4 = re.fullmatch(r"(?:ae|fe|ce|ee|oe)\s+([})\]])", line)
+        if m4:
+            line = m4.group(1)
+        line = re.sub(r"^\+\s*([})\]])", r"\1", line)
+        m3 = re.match(r"^(.*[\w\"'\)\]])(?:ae|fe|ce|ee|oe)$", line)
+        if m3:
+            line = m3.group(1).rstrip()
+            if not line.endswith("}"):
+                line += "}"
         m2 = re.match(r"^(.*\S)(\s*)(\d{1,2})$", line)
         if m2:
             stem = m2.group(1)
             if re.search(r"[})\]]$", stem):
                 line = stem.rstrip()
-        # OCR sometimes reads the gutter number's leading digit as '+'
-        # before a closing brace (e.g. gutter '22 }' -> '+}').
-        line = re.sub(r"^\+\s*([})\]])", r"\1", line)
-        # OCR frequently misreads a lone closing brace (often together
-        # with its gutter number) as two-letter noise: '8 }' -> 'ae',
-        # '13 }' -> 'fe'. Restore the brace.
-        if re.fullmatch(r"(ae|fe|ce|ee|oe)", line):
-            line = "}"
-        # Misread glued to the real brace it precedes ('fe }' -> '}')
-        m4 = re.fullmatch(r"(?:ae|fe|ce|ee|oe)\s+([})\]])", line)
-        if m4:
-            line = m4.group(1)
-        # The same misread can be glued to the end of content lines
-        # (e.g. 'Z_pu=0.10ae'); split it off and close the brace.
-        m3 = re.match(r"^(.*[\w\"'\)\]])(ae|fe|ce|ee|oe)$", line)
-        if m3:
-            line = m3.group(1).rstrip()
-            if not line.endswith("}"):
-                line += "}"
         if line:
             out.append(line)
     return "\n".join(out)
