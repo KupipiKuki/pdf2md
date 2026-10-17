@@ -912,6 +912,22 @@ def clean_box_text(text):
         # OCR sometimes reads the gutter number's leading digit as '+'
         # before a closing brace (e.g. gutter '22 }' -> '+}').
         line = re.sub(r"^\+\s*([})\]])", r"\1", line)
+        # OCR frequently misreads a lone closing brace (often together
+        # with its gutter number) as two-letter noise: '8 }' -> 'ae',
+        # '13 }' -> 'fe'. Restore the brace.
+        if re.fullmatch(r"(ae|fe|ce|ee|oe)", line):
+            line = "}"
+        # Misread glued to the real brace it precedes ('fe }' -> '}')
+        m4 = re.fullmatch(r"(?:ae|fe|ce|ee|oe)\s+([})\]])", line)
+        if m4:
+            line = m4.group(1)
+        # The same misread can be glued to the end of content lines
+        # (e.g. 'Z_pu=0.10ae'); split it off and close the brace.
+        m3 = re.match(r"^(.*[\w\"'\)\]])(ae|fe|ce|ee|oe)$", line)
+        if m3:
+            line = m3.group(1).rstrip()
+            if not line.endswith("}"):
+                line += "}"
         if line:
             out.append(line)
     return "\n".join(out)
@@ -1018,6 +1034,7 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
 
         text = ""
         box_results = []
+        all_boxes = []
         page_h = 0
         if not used_text_layer:
             img, all_boxes = process_page_regions(page, dpi, lang)
@@ -1052,6 +1069,10 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
                 prose_lines = []
             if box_results:
                 text = merge_regions(prose_lines, box_results, dpi, lang, use_mermaid=use_mermaid)
+            elif all_boxes:
+                # Every box was consumed as a continuation; the prose pass
+                # still used the masked image, so just render its lines.
+                text = page_to_markdown(prose_lines, use_mermaid=use_mermaid)
             else:
                 lines = lines_from_ocr(ocr_page(page, dpi, lang))
                 text = page_to_markdown(lines, use_mermaid=use_mermaid)
@@ -1071,7 +1092,8 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
             prev_page_state = None
             text = page_to_markdown(lines, use_mermaid=use_mermaid)
 
-        src = "text layer" if used_text_layer else ("OCR + box regions" if box_results else "OCR")
+        src = ("text layer" if used_text_layer
+               else ("OCR + box regions" if all_boxes else "OCR"))
         parts.append(f"<!-- page {pno} ({src}) -->\n")
         if text:
             parts.append(text)

@@ -136,6 +136,16 @@ class TestLayoutHeuristics(unittest.TestCase):
         cleaned = clean_box_text(box_ocr)
         self.assertEqual(cleaned, "class Breaker:\npass")
 
+    def test_clean_box_text_brace_misreads(self):
+        # OCR frequently reads a lone closing brace (with its gutter
+        # number) as two-letter noise.
+        self.assertEqual(clean_box_text("1 Transformer (\n7 Z_pu=@.10\n\nae"),
+                         "Transformer (\nZ_pu=@.10\n}")
+        self.assertEqual(clean_box_text("fe }"), "}")
+        self.assertEqual(clean_box_text("ae }"), "}")
+        self.assertEqual(clean_box_text("ae"), "}")
+        self.assertEqual(clean_box_text('2 name="T1",'), 'name="T1",')
+
     def test_clean_box_text_glued_closing_brace(self):
         box_ocr = "7 \"kv\": 13.8\n\n8 }5\n"
         cleaned = clean_box_text(box_ocr)

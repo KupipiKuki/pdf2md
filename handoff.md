@@ -149,7 +149,16 @@ User-observed issues after the audit merge, all fixed:
   confusion is upstream), residual glyph noise inside the page-3 JSON
   box, and imperfect edge reconstruction in the merged page-5→6
   Mermaid tree (branch glyph misreads change parent-child edges).
+- **Closing-brace misreads repaired.** OCR frequently reads a lone `}`
+  (with its gutter number) as two-letter noise: `8 }` -> `ae`, `13 }` ->
+  `fe`, sometimes glued to content (`Z_pu=0.10ae`). `clean_box_text`
+  restores the brace for standalone (`ae`), glued (`...ae`), and
+  preceding (`fe }`) variants. The page-6 double-emission is also fixed:
+  when every box on a page was consumed as a continuation, the prose
+  fallback previously re-OCR'd the page *unmasked*, re-reading the
+  consumed tree; it now renders the masked prose lines.
 - Tests: 6 new unit tests for `box_gutter_range`/`boxes_continuing`
+  plus brace-misread repairs (suite: 24 tests, all passing)
   (suite: 23 tests, all passing); smoke test passing.
 
 ## 4. Branch & Git History

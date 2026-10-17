@@ -95,7 +95,7 @@ Expected result:
 "id": "T1",
 "type": "transformer", |
 "connection": "delta-grounded_wye" |
-fe }
+}
 ],
 "connections": [
 re", "r1"4,
@@ -194,7 +194,7 @@ Then the vision output simply fills these objects.
 
 Example:
 
-```python
+```
 Transformer (
 name="T1",
 rating mva=100,
@@ -202,7 +202,7 @@ primary_kv=13.8,
 secondary_kv=138,
 vector_group="Dyg",
 Z_pu=@.10
-ae
+}
 ```
 
 Now downstream modules can:
@@ -237,9 +237,9 @@ flowchart TD
     ElectricalSL_3 --> ControlNarra_8
 ```
 
-<!-- page 6 (OCR) -->
+<!-- page 6 (OCR + box regions) -->
 
-L- P&ID ND UW | — Civil Drawing | Mechanical Assembly 8 L- Control Narrative For electrical SLDs specifically:
+For electrical SLDs specifically:
 
 - Detect diagram region
 - Send crop to VLM
