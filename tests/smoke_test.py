@@ -8,9 +8,13 @@ import sys
 
 import pymupdf
 
+import tempfile
+
 SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "pdf2md.py")
-TEST_PDF = "/tmp/sample_scan.pdf"
-OUT_MD = "/tmp/sample_scan.md"
+TEMP_DIR = tempfile.gettempdir()
+TEST_PDF = os.path.join(TEMP_DIR, "sample_scan.pdf")
+OUT_MD = os.path.join(TEMP_DIR, "sample_scan.md")
+TMP_TEXT_PDF = os.path.join(TEMP_DIR, "_text.pdf")
 
 content = """# Invoice 42
 
@@ -42,11 +46,11 @@ def build_pdf():
             continue
         page.insert_text((60, top), text, fontsize=size, fontname="helv")
         top += size + 10
-    doc.save("/tmp/_text.pdf")
+    doc.save(TMP_TEXT_PDF)
     doc.close()
 
     # Rasterize to simulate a scanned (image-only) document.
-    src = pymupdf.open("/tmp/_text.pdf")
+    src = pymupdf.open(TMP_TEXT_PDF)
     pix = src[0].get_pixmap(dpi=300)
     scan = pymupdf.open()
     page = scan.new_page(width=612, height=792)
@@ -66,7 +70,15 @@ def verify_no_text_layer():
 
 def run_script():
     env = dict(os.environ)
-    env["TESSERACT_CMD"] = env.get("TESSERACT_CMD", "/tmp/squashfs-root/usr/bin/tesseract")
+    if "TESSERACT_CMD" not in env:
+        for candidate in [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            "/tmp/squashfs-root/usr/bin/tesseract",
+        ]:
+            if os.path.isfile(candidate):
+                env["TESSERACT_CMD"] = candidate
+                break
     subprocess.run(
         [sys.executable, SCRIPT, TEST_PDF, "-o", OUT_MD],
         check=True,
