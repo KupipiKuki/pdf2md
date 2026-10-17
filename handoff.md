@@ -1,6 +1,6 @@
 # pdf2md — Revised Handoff & Technical Audit
 
-This document records the audit, enhancements, and architectural recommendations for the `pdf2md` project on branch `vibe/mermaid-lang-detect-and-optimizations`.
+This document records the audit, enhancements, and architectural recommendations for the `pdf2md` project across branches `vibe/mermaid-lang-detect-and-optimizations` and `vibe/docling-vlm-extension-blueprint`.
 
 ---
 
@@ -190,13 +190,22 @@ post-processing):
 
 ## 4. Branch & Git History
 
-- **Branch Name:** `vibe/mermaid-lang-detect-and-optimizations`
+### Branch 1: `vibe/mermaid-lang-detect-and-optimizations` (PR #4 & PR #5 — Merged to `main`)
 - **Base:** `main`
 - **Key Modified Files:**
-  - `scripts/pdf2md.py`: Added language estimation, mermaid conversion, robust box detection, indentation preservation.
-  - `tests/smoke_test.py`: Cross-platform temp path and dynamic tesseract configuration.
-  - `tests/test_heuristics.py`: 13 pure-geometry heuristic unit tests.
-  - `output.md`: Refreshed with the enhanced pipeline output.
+  - [`scripts/pdf2md.py`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py): Added language estimation, mermaid conversion, robust box detection, indentation preservation, cross-page box merging, undirected sequence networks, brace cleaning.
+  - [`tests/smoke_test.py`](file:///o:/Data/Programming/Github/pdf2md/tests/smoke_test.py): Cross-platform temp path and dynamic tesseract configuration.
+  - [`tests/test_heuristics.py`](file:///o:/Data/Programming/Github/pdf2md/tests/test_heuristics.py): 27 pure-geometry heuristic unit tests.
+  - [`output.md`](file:///o:/Data/Programming/Github/pdf2md/output.md): Generated naive pipeline baseline.
+  - [`ref_output.md`](file:///o:/Data/Programming/Github/pdf2md/ref_output.md): User-curated reference standard.
+
+### Branch 2: `vibe/docling-vlm-extension-blueprint` (Active Branch)
+- **Base:** `main` (commit `adeecba`)
+- **Key Deliverables:**
+  - Technical audit and gap analysis between [`output.md`](file:///o:/Data/Programming/Github/pdf2md/output.md) and [`ref_output.md`](file:///o:/Data/Programming/Github/pdf2md/ref_output.md).
+  - Pre-processing evaluation: rationale for image-based diagram review vs pure OCR.
+  - Code block indentation root cause diagnosis and deterministic `image_to_data` fix specification.
+  - Comprehensive architectural blueprint for the Docling Extension + VLM engineering pipeline.
 
 ---
 
@@ -340,4 +349,334 @@ def check_vstrip_continuous(dark, y1, y2, x_center, half_w=10, max_break=30):
 +TMP_TEXT_PDF = os.path.join(TEMP_DIR, "_text.pdf")
 ```
 * Dynamically resolves `TESSERACT_CMD` across platform default paths when not already set in `os.environ`.
+
+---
+
+## 6. Docling Extension & VLM Integration Blueprint
+
+This section provides a strategic architectural assessment, a gap analysis comparing the current naive pipeline output against the user-curated reference standard, a root-cause fix for code block spacing, and an engineering blueprint for integrating this system into **IBM Docling** with **Vision-Language Model (VLM)** capabilities.
+
+---
+
+### 6.1 Systematic Gap Analysis: Naive Pipeline (`output.md`) vs. Target (`ref_output.md`)
+
+A side-by-side comparison of the automated OCR output ([`output.md`](file:///o:/Data/Programming/Github/pdf2md/output.md)) against the target post-processed output ([`ref_output.md`](file:///o:/Data/Programming/Github/pdf2md/ref_output.md)) reveals four distinct classes of divergence:
+
+| Document Section | Naive OCR Output ([`output.md`](file:///o:/Data/Programming/Github/pdf2md/output.md)) | Target Reference ([`ref_output.md`](file:///o:/Data/Programming/Github/pdf2md/ref_output.md)) | Failure Mode / Gap Category | Resolution Mechanism |
+|---|---|---|---|---|
+| **Document Title & Prose (P.1)** | `# Cz5IuxVR-electricalDiagramOCR`<br>`\| think that's actually...` | `# electricalDiagramOCR`<br>`I think that's actually...` | OCR header token prefix & pipe character misread as letter `I` | Docling document title extraction & text layer normalization |
+| **Markdown Hierarchy (P.1, P.3, P.4, P.5)** | Headings emitted as plain text (`Proposed Pipeline`, `Positive Sequence Network`) or collapsed into body text (`Stage 1: Detect... The extension...`) | Explicit Markdown headings (`### Proposed Pipeline`, `### Stage 1: Detect...`) with visual dividers (`---`) | Layout model classification failure; line height / isolation heuristic thresholding | Docling Layout Model (`SectionHeaderItem`) |
+| **Pipeline Flowchart Topology (P.1)** | Linear fan-out to 5 figure types, but only `Electrical SLD` connects to `Vision Model`: `ElectricalSL_10 --> VisionModelE_11` | All 5 figure types fan back IN to `Vision Model`: `Photograph_6 --> VisionModelE_11`, `Plot_7 --> VisionModelE_11`, etc. | Topology fan-in truncation; ASCII art lacked contiguous vertical return pipes, causing heuristic tree parser to miss converging edges | Multimodal VLM visual graph transcription |
+| **JSON Indentation & Gutter Leakage (P.1, P.2–3)** | Flush-left JSON (0 spaces); OCR noise in connection arrays: `"transformer", \|`<br>`re", "r1"4,`<br>`["T1i","LINE"]` | 2-space indented JSON; valid syntactic array: `["G", "T1"],`<br>`["T1","LINE"]` | Monospace whitespace collapse in `image_to_string` (--psm 6); character erosion on degraded scan | Word-coordinate bounding box projection (`image_to_data`) or VLM code transcription |
+| **Python Code Indentation (P.4, P.5)** | Zero-indent Python: `class Generator:\npass`<br>`if transformer.primary == "delta":\nblock zero sequence()` | Strict 4-space Python indentation with clean inter-class spacing | Tesseract collapses spaces between gutter number and code to 1 space; stripped by gutter cleaner | Word-level relative coordinate calculation `((word_left - base_left) // char_w)` |
+| **Domain Model Instantiation (P.5)** | Bare text fence ```` ``` ```` without language; unindented keyword args; trailing unclosed bracket | ````python ```` fence; 4-space indented keyword args; clean syntax | Language estimator rejected block due to unbalanced `{`/`)` OCR noise | VLM domain model reconstruction |
+| **Taxonomy Hierarchy (P.5–6)** | `flowchart TD` with distorted parent-child nesting (`Docling --> Civil Drawing --> Mechanical Assembly`, `Protection Scheme --> P&ID`) | `flowchart LR` with uniform 1-to-many fan-out: `EngineeringFigureExtension` connects directly to all 6 drawing types | Line wrapping and cross-page split across pages 5 and 6 degraded ASCII branch markers (`├──`, `└──`) | Image crop passed to VLM with schema-enforced Mermaid prompt |
+
+---
+
+### 6.2 Pre-processing & Image-Based Diagram Review: Architectural Evaluation & Decision
+
+**User Inquiry:** *Is it worthwhile to add pre-processing to review diagrams as images to determine if they can be better converted?*
+
+**Architectural Verdict: YES — it is not only worthwhile, but mandatory.** Pure character-level OCR has reached a hard theoretical ceiling on engineering diagrams. 
+
+#### Why Pure Character OCR Fails on Diagrams
+1. **Heuristic Patches Do Not Scale:** Current fixes in [`scripts/pdf2md.py`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py) rely on character regex replacements (e.g., `ae` $\rightarrow$ `}`, `71` $\rightarrow$ `T1`, `+}` $\rightarrow$ `}`). While these solve specific scan artifacts in this test document, they are inherently fragile. Changing scan resolution (e.g., 200 DPI vs. 300 DPI), font face, skew angle, or scanner compression introduces completely different glyph misreads.
+2. **Real Engineering Diagrams Are Not Character Art:** Real-world engineering documents (Single Line Diagrams, Piping & Instrumentation Diagrams, Relay Schematics, Civil Drawings) are not composed of ASCII characters or text boxes. They are complex graphical topologies containing:
+   - Standardized IEEE/IEC vector symbols (circuit breakers, transformer windings, delta/wye connections, current transformers).
+   - Busbars, junction nodes, and orthogonal connection paths with jump/crossover loops.
+   - Text annotations positioned with spatial relativity (e.g., impedance values placed beside transformer symbols, device ANSI numbers inside circles).
+   - No character OCR engine (Tesseract, EasyOCR) has an understanding of spatial vector topology, connectivity, or flow direction.
+3. **The Multi-Branch Fan-In / Fan-Out Dilemma:** As proven on Page 1 of the test scan, an ASCII diagram representing parallel convergence into a single node cannot be reliably distinguished from separate sequential blocks when OCR breaks contiguous vertical line characters (`|`).
+
+#### Strategic Decision
+Diagrams must be detected as bounded image regions, cropped at full raster resolution, and reviewed/processed visually. The naive `pdf2md` box detector already performs the necessary geometric isolation; routing these image crops to a Vision-Language Model (VLM) unlocks genuine semantic understanding rather than error-prone glyph reconstruction.
+
+---
+
+### 6.3 Code Block Indentation & Spacing: Root Cause & Deterministic Fix
+
+#### Root Cause Analysis
+In [`scripts/pdf2md.py`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py), `ocr_region()` invokes:
+```python
+pytesseract.image_to_string(crop, config="--psm 6")
+```
+When running `--psm 6` (Uniform Block of Text), Tesseract segments characters into words and normalizes all intra-line whitespace runs into a single ASCII space ` ` (`0x20`). 
+
+In the Page 4–5 code listings, gutter numbers precede the code:
+- Pixel coordinates: Gutter digit `5` ends at $x \approx 45\text{ px}$. The unindented token `class` begins at $x \approx 75\text{ px}$. The indented token `pass` begins at $x \approx 178\text{ px}$ ($\Delta x \approx +103\text{ px}$, equivalent to ~4 monospace characters).
+- However, `image_to_string` emits `'5 pass'` with only **one** space separating the gutter digit from `pass`.
+- When `clean_box_text()` executes its regex `re.match(r"^\s*(\d{1,3})[.)]?[ \t](.*)$", raw)`, it consumes the `'5 '` prefix, leaving `pass` starting at index 0. All indentation is permanently lost.
+
+#### Two-Phase Solution
+
+##### Phase 1: Deterministic Geometry-Based Fix (`image_to_data`)
+Without requiring an external LLM, indentation can be restored deterministically by inspecting word coordinates from `pytesseract.image_to_data`:
+
+```python
+def ocr_code_region_with_indent(crop_img) -> str:
+    """
+    Extracts monospace text while reconstructing exact visual indentation
+    using word-level bounding box coordinates.
+    """
+    import numpy
+    import re
+    import pytesseract
+    from pytesseract import Output
+    
+    data = pytesseract.image_to_data(crop_img, config="--psm 6", output_type=Output.DICT)
+    
+    # 1. Group words by (block_num, par_num, line_num)
+    lines_by_idx = {}
+    for i in range(len(data["text"])):
+        w_text = data["text"][i].strip()
+        if not w_text:
+            continue
+        line_key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        lines_by_idx.setdefault(line_key, []).append({
+            "text": w_text,
+            "left": data["left"][i],
+            "top": data["top"][i],
+            "width": data["width"][i],
+            "height": data["height"][i]
+        })
+        
+    if not lines_by_idx:
+        return ""
+        
+    # 2. Identify gutter column and code base column
+    # Monospace character width estimate (median word_width / char_count)
+    char_widths = [w["width"] / max(1, len(w["text"])) 
+                   for line in lines_by_idx.values() for w in line]
+    char_w = float(numpy.median(char_widths)) if char_widths else 12.0
+    
+    cleaned_lines = []
+    # Find minimum left coordinate among non-gutter tokens
+    code_lefts = []
+    for line in lines_by_idx.values():
+        words = list(line)
+        if words and re.match(r"^\d{1,3}[.)]?$", words[0]["text"]):
+            words = words[1:]
+        if words:
+            code_lefts.append(words[0]["left"])
+            
+    base_left = min(code_lefts) if code_lefts else 0
+    
+    # 3. Reconstruct lines with calculated indentation
+    for line_key in sorted(lines_by_idx.keys(), key=lambda k: lines_by_idx[k][0]["top"]):
+        words = lines_by_idx[line_key]
+        if not words:
+            continue
+        # Strip gutter prefix
+        if re.match(r"^\d{1,3}[.)]?$", words[0]["text"]):
+            words = words[1:]
+        if not words:
+            continue
+            
+        first_word = words[0]
+        indent_px = max(0, first_word["left"] - base_left)
+        indent_spaces = int(round(indent_px / char_w))
+        
+        # Assemble line words with inter-word spacing
+        line_str = " " * indent_spaces + words[0]["text"]
+        for prev_w, curr_w in zip(words[:-1], words[1:]):
+            gap_px = curr_w["left"] - (prev_w["left"] + prev_w["width"])
+            spaces = max(1, int(round(gap_px / char_w)))
+            line_str += (" " * spaces) + curr_w["text"]
+            
+        cleaned_lines.append(line_str)
+        
+    return "\n".join(cleaned_lines)
+```
+
+##### Phase 2: VLM Visual Transcription (Production Standard)
+When diagram/code crops are routed through a Multimodal Model (e.g., Gemini 2.5 Flash), the model perceives visual layout directly and emits syntactically valid, indented Python and JSON naturally, completely bypassing OCR character spacing limits.
+
+---
+
+### 6.4 Strategic Blueprint: Extending Docling with Engineering VLM Capabilities
+
+The thesis articulated in the test document itself is the exact architectural blueprint to follow:
+> *"The weakness isn't Docling's OCR or document understanding. The weakness is that an electrical single-line diagram is fundamentally a graph with engineering semantics, not a document."*
+
+Rather than maintaining a standalone bespoke PDF conversion script, `pdf2md` should evolve into an **Engineering Figure Extension** for **IBM Docling** (`docling-core` / `docling-ibm-models`).
+
+```mermaid
+flowchart TD
+    subgraph DoclingCore ["1. Docling Core Ingestion"]
+        PDF["Input PDF / Scan"] --> DP["DoclingParser & Layout Engine"]
+        DP --> Prose["Prose / Headings / Tables"]
+        DP --> Figures["Figure Bounding Box Crops"]
+    end
+
+    subgraph ExtModule ["2. EngineeringFigureExtension (pdf2md)"]
+        Figures --> Classifier{"Figure Classifier (Fast CV / VLM)"}
+        Classifier -->|"Photo / Plot"| StdDoc["Standard Docling Image Passthrough"]
+        Classifier -->|"Flowchart / Logic"| VLM_Flow["VLM Mermaid Synthesizer"]
+        Classifier -->|"Code Listing"| VLM_Code["VLM Code Transcriber (Preserves Indent)"]
+        Classifier -->|"Electrical SLD / P&ID"| VLM_SLD["VLM Graph Topology Extractor"]
+    end
+
+    subgraph DomainEngine ["3. Python Engineering Engine"]
+        VLM_SLD --> JSON_Graph["Topology JSON (Components & Connections)"]
+        JSON_Graph --> NX["NetworkX Graph Builder"]
+        NX --> PosNet["Positive Sequence Graph (X1)"]
+        NX --> NegNet["Negative Sequence Graph (X2)"]
+        NX --> ZeroNet["Zero Sequence Graph & Delta-Wye Rules (X0)"]
+        NX --> FaultCalc["Fault Current Paths & KaTeX Math"]
+    end
+
+    subgraph DocumentAssembler ["4. Enriched Markdown Document"]
+        Prose --> FinalMD["Final Enriched Markdown Document"]
+        StdDoc --> FinalMD
+        VLM_Flow --> FinalMD
+        VLM_Code --> FinalMD
+        PosNet --> FinalMD
+        NegNet --> FinalMD
+        ZeroNet --> FinalMD
+        FaultCalc --> FinalMD
+    end
+```
+
+#### Detailed Stage Specifications
+
+#### Stage 1: Document Layout & Figure Detection (Docling Ingestion)
+- **Engine:** IBM Docling (`DocumentConverter`, `PdfFormatOption`).
+- **Function:** Docling parses reading order, detects standard headings, handles tables, and isolates figures as cropped PIL images with coordinate metadata (`doc.figures`).
+- **Advantage:** Eliminates custom PDF text-layer vs. image-layer rasterization logic and provides battle-tested paragraph layout parsing.
+
+#### Stage 2: Figure Classification (`FigureClassifier`)
+- **Function:** Classifies extracted figure crops into one of 6 discrete categories:
+  1. `photograph`
+  2. `plot_or_chart`
+  3. `flowchart_or_tree`
+  4. `code_listing`
+  5. `electrical_sld`
+  6. `piping_and_instrumentation`
+- **Implementation:** Lightweight vision classifier (e.g., CLIP / ViT zero-shot or a fast, low-cost VLM call with temperature=0).
+
+#### Stage 3: Multimodal VLM Extraction (Domain-Specific Prompts)
+Crops are sent to a multimodal model (e.g., Gemini 2.5 Flash / Claude 3.5 Sonnet / Qwen2-VL) with targeted system prompts:
+
+- **Mode A: Monospace Code Transcription**
+  ```text
+  You are an expert OCR transcription engine specializing in source code.
+  Transcribe the text in this image crop verbatim.
+  Rules:
+  1. Detect programming language and enclose in triple backticks with language tag.
+  2. Preserve exact 4-space Python indentation or 2-space JSON indentation.
+  3. Strip margin line/gutter numbers (e.g., '1', '2', '3') from the left margin.
+  4. Fix obvious OCR character noise while preserving variable names and syntax.
+  ```
+
+- **Mode B: Flowchart / Hierarchy Synthesis**
+  ```text
+  You are an expert technical diagram converter.
+  Convert the flow chart or hierarchical diagram in this image into valid Mermaid syntax.
+  Rules:
+  1. Emit either 'flowchart TD' or 'flowchart LR' based on the primary layout orientation.
+  2. Faithfully capture multi-node fan-in (multiple arrows converging on one node) and fan-out.
+  3. Clean OCR noise in node labels.
+  4. Output ONLY the ```mermaid code block.
+  ```
+
+- **Mode C: Electrical SLD Topology Extraction**
+  ```text
+  Analyze this electrical power-system single-line diagram (SLD).
+  Extract all electrical entities and connectivity into strict JSON matching this schema:
+  {
+    "components": [
+      {
+        "id": string,
+        "type": "generator" | "transformer" | "transmission_line" | "motor" | "bus" | "breaker",
+        "rating_mva": number | null,
+        "kv": number | null,
+        "connection": string | null,
+        "vector_group": string | null,
+        "z_pu": number | null
+      }
+    ],
+    "connections": [
+      [string, string]
+    ]
+  }
+  ```
+
+#### Stage 4: Python Engineering Rule Engine (`networkx` + Domain Rules)
+The key architectural insight from the reference document is:
+> *"The engineering-rule engine will provide more value than the vision model itself. The vision model identifies 'A-Yg transformer'; the rule engine knows 'zero-sequence current is blocked through the delta side.' That's where the domain expertise really comes from."*
+
+The extracted JSON topology feeds directly into a deterministic Python rule engine:
+```python
+import networkx as nx
+
+class ElectricalDomainEngine:
+    def __init__(self, sld_data: dict):
+        self.sld = sld_data
+        self.graph = nx.Graph()
+        self._build_topology()
+        
+    def _build_topology(self):
+        for comp in self.sld["components"]:
+            self.graph.add_node(comp["id"], **comp)
+        for u, v in self.sld["connections"]:
+            self.graph.add_edge(u, v)
+            
+    def generate_positive_sequence_mermaid(self) -> str:
+        """Derives positive sequence impedance network (X1)."""
+        nodes = []
+        for n, data in self.graph.nodes(data=True):
+            label = f"Xs({n})" if data.get("type") in ("generator", "motor") else f"X{n}"
+            nodes.append(f'{n}["{label}"]')
+        edges = [f"{u} --- {v}" for u, v in self.graph.edges()]
+        return "flowchart TD\n    " + "\n    ".join(nodes + edges)
+
+    def generate_zero_sequence_mermaid(self) -> str:
+        """Applies transformer winding rules to derive zero-sequence boundaries."""
+        zero_graph = self.graph.copy()
+        for n, data in self.graph.nodes(data=True):
+            if data.get("type") == "transformer":
+                conn = str(data.get("connection", "")).lower()
+                vector = str(data.get("vector_group", "")).lower()
+                # Delta windings block zero-sequence propagation
+                if "delta" in conn or "d" in vector:
+                    for neighbor in list(zero_graph.neighbors(n)):
+                        zero_graph.remove_edge(n, neighbor)
+        # Emit isolated subgraphs
+        ...
+```
+
+#### Stage 5: Markdown Document Re-Assembly
+Docling's document model represents elements as structured AST nodes (`TextItem`, `TableItem`, `PictureItem`). The extension replaces opaque figure nodes with:
+- The synthesized Mermaid topology diagram.
+- Automatically derived Positive, Negative, and Zero sequence network Mermaid graphs.
+- Formatted KaTeX LaTeX fault equations:
+  $$I_{f} = \frac{3 V_{LN}}{X_1 + X_2 + X_0 + 3 Z_f}$$
+- Verified, indented Python and JSON domain models.
+- Domain engineering explanations explaining fault isolation and protection implications.
+
+---
+
+### 6.5 Actionable Implementation Roadmap for the Primary Coder
+
+To evolve the codebase systematically from the current naive baseline to the full Docling VLM extension, execute the following steps in sequence:
+
+1. **Immediate (Deterministic Code Indentation Fix):**
+   - In [`scripts/pdf2md.py`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py), replace the uniform `image_to_string` call in `ocr_region()` with the word-geometry `image_to_data` indentation reconstruction described in Section 6.3.
+   - Verify that Page 4 `pass` lines indent 4 spaces and JSON keys indent 2 spaces.
+   - Add unit tests in [`tests/test_heuristics.py`](file:///o:/Data/Programming/Github/pdf2md/tests/test_heuristics.py) for word-coordinate indentation calculation.
+
+2. **Crop Export Tooling:**
+   - Add a CLI flag `--export-crops DIR` to [`scripts/pdf2md.py`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py) to save all detected box regions as isolated PNGs (e.g. `page1_box1.png`, `page2_box1.png`).
+   - This provides the exact image payloads needed for VLM benchmarking and classifier training.
+
+3. **VLM Integration Prototype (`scripts/vlm_enrichment.py`):**
+   - Implement an optional VLM pass using `google-genai` (Gemini 2.5 Flash) or LiteLLM.
+   - Provide a `--vlm` flag that routes exported box crops through the Mode A/B/C prompts detailed in Section 6.4.
+   - Benchmark the VLM markdown output directly against [`ref_output.md`](file:///o:/Data/Programming/Github/pdf2md/ref_output.md).
+
+4. **Docling Extension Packaging:**
+   - Package the geometry detectors, classification router, and VLM enrichment into a standalone Python package (`docling-engineering`).
+   - Register as a custom plugin with Docling's `DocumentConverter` pipeline.
+
 
