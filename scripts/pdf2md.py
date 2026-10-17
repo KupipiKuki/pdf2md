@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
-"""Convert a scanned PDF into a Markdown file.
+"""Convert a scanned PDF into a structured Markdown file.
 
-Uses the PDF's embedded text layer when one exists (searchable scanned
-PDFs); otherwise renders each page and falls back to Tesseract OCR.
+Uses the PDF's embedded text layer when requested (--prefer-text-layer);
+otherwise renders each page, detects rectangular bordered regions (code/diagrams)
+for uniform block OCR (PSM 6), and performs layout-aware OCR (PSM 3) on the prose.
+Heuristically recovers structure: headings, lists, code blocks with language
+estimation, and converts ASCII/box diagrams into Mermaid diagrams.
 
 Usage:
     python pdf2md.py input.pdf [-o output.md] [--lang eng] [--dpi 300]
-                               [--force-ocr] [--save-images DIR]
+                               [--prefer-text-layer] [--save-images DIR]
+                               [--no-mermaid]
 
-Requires: pymupdf (pip install pymupdf), numpy (pip install numpy), and
-the tesseract binary (e.g. `apt install tesseract-ocr` or `brew install
-tesseract`) when OCR is needed. If tesseract is not on PATH, set the
-TESSERACT_CMD environment variable to its full path.
+Requires: pymupdf, pytesseract, numpy, and the tesseract binary.
+If tesseract is not on PATH, set the TESSERACT_CMD environment variable.
 """
 
 import argparse
 import io
+import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 
@@ -34,9 +38,23 @@ try:
 except ImportError:
     sys.exit("Missing dependency: run `pip install numpy`")
 
+# ---------------------------------------------------------------------------
+# Centralized Heuristic Constants
+# ---------------------------------------------------------------------------
 MIN_TEXT_CHARS = 30
+BOX_BORDER_PAD = 8
+BOX_MIN_W_FRAC = 0.15
+BOX_MIN_H = 35
+BOX_MAX_GAP = 4
+BOX_TOLERANCE_PX = 85
+PARAGRAPH_GAP_RATIO = 1.2
+HEADING_HEIGHT_RATIO = 1.15
+OCR_CONFIDENCE_THRESHOLD = 30
 
 
+# ---------------------------------------------------------------------------
+# Rendering & OCR Extraction
+# ---------------------------------------------------------------------------
 def render_page(page, dpi):
     pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
     return pix.tobytes("png")
@@ -55,7 +73,8 @@ def ocr_page(page, dpi, lang):
             output_type=pytesseract.Output.DICT,
         )
     finally:
-        os.unlink(tmp_path)
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
     return data
 
 
@@ -68,7 +87,7 @@ def lines_from_ocr(data):
             conf = float(data["conf"][i])
         except (TypeError, ValueError):
             conf = -1.0
-        if not word or conf < 30:
+        if not word or conf < OCR_CONFIDENCE_THRESHOLD:
             continue
         key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
         top, height = data["top"][i], data["height"][i]
@@ -129,12 +148,239 @@ def lines_from_text_layer(page):
     return lines
 
 
+# ---------------------------------------------------------------------------
+# Regex Patterns
+# ---------------------------------------------------------------------------
 GUTTER_RE = re.compile(r"^(\d{1,3})[.)]?$")
 BULLET_RE = re.compile(r"^([•▪◦‣·\-–*eo©])\s+(.+)$")
 BULLET_WORD_RE = re.compile(r"^(e|o|©)\s+([A-Za-z].*)$")
 NUMBERED_RE = re.compile(r"^(\d{1,2})[.)]\s+(.+)$")
+ASCII_ART_RE = re.compile(r"[|\u2500-\u257f\u2190-\u21ff]|Vv|L_|L\.|\|-|-\||\+-")
 
 
+# ---------------------------------------------------------------------------
+# Language & Diagram Estimation (User Notes)
+# ---------------------------------------------------------------------------
+def estimate_code_language(code):
+    """Heuristically estimate the programming language of a code block.
+    Returns a markdown language identifier ('json', 'python', 'yaml', 'bash', 'mermaid')
+    or an empty string '' if indeterminate."""
+    if not code or not code.strip():
+        return ""
+    text = code.strip()
+
+    # Mermaid check
+    if re.match(r"^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|mindmap)\b", text):
+        return "mermaid"
+
+    # Strict or structural JSON check
+    stripped_first = text[0] if text else ""
+    if stripped_first in ("{", "["):
+        try:
+            json.loads(text)
+            return "json"
+        except Exception:
+            pass
+        # Common JSON snippets in technical documents (may have missing brackets or trailing commas)
+        if len(re.findall(r'"[\w\s.-]+"\s*:\s*("[^"]*"|\d+|true|false|null|\[|\{)', text)) >= 1:
+            return "json"
+
+    # JSON key-value pairs without enclosing brackets
+    if len(re.findall(r'"[\w\s.-]+"\s*:\s*("[^"]*"|\d+|true|false|null)', text)) >= 2:
+        return "json"
+
+    # Python patterns
+    py_patterns = [
+        r"\bimport\s+[\w.]+",
+        r"\bfrom\s+[\w.]+\s+import\b",
+        r"\bdef\s+[\w_]+\s*\(",
+        r"\bclass\s+[\w_]+(?:\s*\([^)]*\))?\s*:",
+        r"\bclass\s+[\w_]+:\s*pass\b",
+        r"^\s*pass\b",
+        r"\breturn\b",
+        r"\bself\.",
+        r"\b__init__\b",
+        r"\belif\s+.*:",
+        r"\bif\s+.*:\s*$",
+        r"\bprint\s*\(",
+        r"\braise\s+\w+",
+        r"^\s*except(?:\s+[\w_]+)?\s*:",
+        r"^\s*finally\s*:",
+    ]
+    py_score = sum(1 for pat in py_patterns if re.search(pat, text, re.MULTILINE))
+    # Python object instantiation with kwargs, e.g., Transformer(name="T1", rating_mva=100)
+    if re.search(r"\b[A-Z]\w+\s*\(\s*[\w_]+\s*=\s*", text):
+        py_score += 2
+
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if py_score >= 1 and not re.search(r"[{};]\s*$", text, re.MULTILINE):
+        if py_score >= 2 or any(re.search(r"^\s*(def|class|import|from)\b|^\s*if\s+.*:\s*|^\s*pass\b", l) for l in lines):
+            return "python"
+
+    # Bash / Shell command checks
+    bash_patterns = [
+        r"^\s*pip\s+install\b",
+        r"^\s*sudo\s+(apt|brew|systemctl)\b",
+        r"^\s*python\s+[\w.-]+\.py\b",
+        r"^\s*git\s+(clone|checkout|commit|push|pull|status)\b",
+        r"^\s*npm\s+(install|run|test)\b",
+        r"^\s*\$\s+[a-z]",
+    ]
+    if any(re.search(p, text, re.MULTILINE) for p in bash_patterns):
+        return "bash"
+
+    # YAML check (guard against natural English prose with colons/lists)
+    is_prose = len(re.findall(r"\b(this|the|an|analyze|identify|return|please|with|from)\b", text, re.IGNORECASE)) >= 2
+    if not is_prose:
+        yaml_kv = len(re.findall(r"^[A-Za-z0-9_-]+:\s+(?:\S.*|$)", text, re.MULTILINE))
+        yaml_item = len(re.findall(r"^\s*-\s+[A-Za-z0-9_-]+", text, re.MULTILINE))
+        if (yaml_kv >= 2 or (yaml_kv >= 1 and yaml_item >= 1)) and "{" not in text:
+            return "yaml"
+
+    return ""
+
+
+def parse_ascii_diagram_to_mermaid(lines):
+    """Attempt to parse an ASCII flow chart, tree diagram, or linear pipeline into Mermaid.
+    Returns (is_diagram: bool, mermaid_code: str)."""
+    if isinstance(lines, str):
+        lines = lines.splitlines()
+    cleaned_lines = [l.strip() for l in lines if l.strip()]
+    if not cleaned_lines:
+        return False, ""
+
+    # 1. Linear sequence pipeline check (e.g., "G | T1 | LINE | T2 | M" or "A -> B -> C")
+    if len(cleaned_lines) == 1:
+        line = cleaned_lines[0]
+        if " | " in line or " -> " in line or " --> " in line:
+            sep = " | " if " | " in line else (" --> " if " --> " in line else " -> ")
+            parts = [p.strip() for p in line.split(sep) if p.strip()]
+            if len(parts) >= 3:
+                node_defs = []
+                for i, p in enumerate(parts):
+                    nid = f"N{i+1}"
+                    lbl = p.replace('"', "'")
+                    node_defs.append(f'{nid}["{lbl}"]')
+                return True, "flowchart LR\n    " + " --> ".join(node_defs)
+
+    # 2. Flowchart and tree markers
+    arrow_pattern = re.compile(r"^(\||\bv\b|\bV\b|Vv|▼|↓|\^|--+>|==+>)+$", re.IGNORECASE)
+    tree_branch_prefix = re.compile(r"^([|\[\]\(\)]*\s*(?:\|-|\+-|L[-_.]|r[-_.]|[├└\u2500-\u257f])\s*)(.*)$")
+
+    arrow_lines = 0
+    tree_lines = 0
+    for l in cleaned_lines:
+        if arrow_pattern.match(l):
+            arrow_lines += 1
+        elif tree_branch_prefix.match(l) or l.startswith("| ") or l.startswith("|-") or l.startswith("L-") or l.startswith("L_"):
+            tree_lines += 1
+
+    is_diagram = (arrow_lines >= 2) or (tree_lines >= 2) or (arrow_lines + tree_lines >= len(cleaned_lines) * 0.35)
+    if not is_diagram:
+        return False, ""
+
+    nodes = []
+    edges = []
+    node_counter = 1
+
+    def make_id(label):
+        nonlocal node_counter
+        clean = re.sub(r"[^A-Za-z0-9_]", "", label)
+        if not clean or clean[0].isdigit():
+            clean = f"node_{node_counter}"
+        else:
+            clean = f"{clean[:12]}_{node_counter}"
+        node_counter += 1
+        return clean
+
+    def clean_label(text):
+        t = re.sub(r"^([|\[\]\(\)]*\s*(?:\|-|\+-|L[-_.]|r[-_.]|[├└\u2500-\u257f])\s*)", "", text).strip()
+        # Clean common OCR misreads of tree branches like 'Je Civil Drawing' or 'r- P&ID'
+        t = re.sub(r"^[JjFfrI][eE—–\-]\s*", "", t).strip()
+        t = re.sub(r"^[|\[\]\s]+", "", t).strip()
+        t = t.replace('"', "'")
+        # Sanitize HTML-like angle brackets for Mermaid
+        t = t.replace("<—", "&lt;--").replace("<--", "&lt;--").replace("<-", "&lt;--")
+        t = t.replace("<", "&lt;").replace(">", "&gt;")
+        return t
+
+    current_main_node = None
+    last_node = None
+    current_tree_parent = None
+    sub_parent = None
+
+    i = 0
+    n = len(cleaned_lines)
+    while i < n:
+        raw = cleaned_lines[i]
+        if arrow_pattern.match(raw):
+            i += 1
+            continue
+
+        m_tree = tree_branch_prefix.match(raw)
+        is_tree_branch = bool(m_tree or raw.startswith("| ") or raw.startswith("|-") or raw.startswith("L-") or raw.startswith("L_"))
+
+        lbl = clean_label(raw)
+        if not lbl:
+            i += 1
+            continue
+
+        nid = make_id(lbl)
+        nodes.append((nid, lbl))
+
+        if is_tree_branch:
+            prefix = m_tree.group(1) if m_tree else raw
+            if ("L_" in prefix or "L." in prefix or "L-" in prefix or "└" in prefix) and sub_parent:
+                edges.append((sub_parent, nid))
+                sub_parent = None
+            else:
+                parent = current_tree_parent or current_main_node or last_node
+                if parent and parent != nid:
+                    edges.append((parent, nid))
+
+                lbl_lower = lbl.lower()
+                if any(w in lbl_lower for w in ["detector", "extension", "drawing", "scheme"]):
+                    current_tree_parent = nid
+                elif any(w in lbl_lower for w in ["text", "tables", "sld"]):
+                    if "route here" in lbl_lower or "&lt;--" in lbl or "<--" in lbl:
+                        current_main_node = nid
+                    else:
+                        sub_parent = nid
+        else:
+            prev_has_arrow = (i > 0 and arrow_pattern.match(cleaned_lines[i-1]))
+            if prev_has_arrow:
+                parent = current_main_node or last_node
+                if parent and parent != nid:
+                    edges.append((parent, nid))
+                current_main_node = nid
+                current_tree_parent = None
+                sub_parent = None
+            else:
+                if not current_main_node:
+                    current_main_node = nid
+                else:
+                    parent = current_main_node
+                    if parent != nid:
+                        edges.append((parent, nid))
+                    current_tree_parent = nid
+        last_node = nid
+        i += 1
+
+    if not edges and len(nodes) < 2:
+        return False, ""
+
+    out = ["flowchart TD"]
+    for nid, lbl in nodes:
+        out.append(f'    {nid}["{lbl}"]')
+    for f, t in edges:
+        out.append(f"    {f} --> {t}")
+
+    return True, "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Layout Heuristics
+# ---------------------------------------------------------------------------
 def detect_gutters(lines):
     """Find left-gutter line numbers: a vertical run of >=3 pure-number
     lines at nearly the same left edge. Returns a set of line indices."""
@@ -155,7 +401,7 @@ def group_into_paragraphs(lines, median_height):
     current = []
     prev = None
     for ln in lines:
-        if prev is not None and ln["top"] - prev["bottom"] > 1.2 * median_height:
+        if prev is not None and ln["top"] - prev["bottom"] > PARAGRAPH_GAP_RATIO * median_height:
             if current:
                 blocks.append(current)
             current = []
@@ -174,8 +420,27 @@ def strip_gutter_prefix(text, gutter_numbers):
     return text
 
 
+def clean_block_lines(block):
+    """Filter out stray OCR artifacts (<=2 chars) that overlap vertically with a longer line."""
+    filtered = []
+    for i, l in enumerate(block):
+        if len(l["text"].strip()) <= 2:
+            overlaps = any(
+                j != i and len(other["text"].strip()) > 2 and
+                not (l["bottom"] < other["top"] or l["top"] > other["bottom"])
+                for j, other in enumerate(block)
+            )
+            if overlaps:
+                continue
+        filtered.append(l)
+    return filtered
+
+
 def render_block(block, median_height, max_size):
     """Convert one block of lines into Markdown."""
+    block = clean_block_lines(block)
+    if not block:
+        return None
     texts = [l["text"].strip() for l in block]
     first = block[0]
     text = " ".join(texts).strip()
@@ -184,7 +449,7 @@ def render_block(block, median_height, max_size):
         return None
 
     is_single = len(block) == 1
-    big = first.get("size", 0) >= max_size * 0.98 or first["height"] >= 1.15 * median_height
+    big = first.get("size", 0) >= max_size * 0.98 or first["height"] >= HEADING_HEIGHT_RATIO * median_height
     bold = first.get("bold", False)
 
     m = NUMBERED_RE.match(text) if is_single and (big or bold) else None
@@ -224,8 +489,7 @@ def render_block(block, median_height, max_size):
 
 def looks_like_list(block):
     """Detect vertical bullet lists where OCR dropped the bullet glyphs:
-    short lines, near-uniform left alignment (within ~30px, since lost
-    bullets shift text left), uniform vertical rhythm."""
+    short lines, near-uniform left alignment (within ~30px), uniform vertical rhythm."""
     lefts = [l["left"] for l in block]
     texts = [l["text"].strip() for l in block]
     if any(len(t) > 60 for t in texts):
@@ -256,7 +520,7 @@ def looks_like_code(lines, gutter_idx):
     codey = 0
     for l in lines:
         t = l["text"]
-        if re.search(r"[{}\[\]=<>;]|^def |^class |^import |if\b.*:$|\"[a-z_0-9]+\":|^\)", t):
+        if re.search(r"[{}\[\]=<>;]|^def |^class |^import |if\b.*:$|\"[a-z_0-9]+\":|^\)|class\s+\w+:|pass\b", t):
             codey += 1
     return codey >= max(2, len(lines) // 2 + 1)
 
@@ -278,9 +542,6 @@ def strip_inline_gutters(lines):
     return out
 
 
-ASCII_ART_RE = re.compile(r"[|\u2500-\u257f\u2190-\u21ff]|Vv|L_|L\.|\|-|-\||\+-")
-
-
 def looks_like_ascii_art(block):
     """Detect vertical flowcharts / box diagrams made of pipes and arrows."""
     if len(block) < 3:
@@ -292,7 +553,7 @@ def looks_like_ascii_art(block):
     return artsy >= len(block) // 2
 
 
-def page_to_markdown(lines, force_biggest=None):
+def page_to_markdown(lines, force_biggest=None, use_mermaid=True):
     if not lines:
         return ""
     heights = sorted(l["height"] for l in lines)
@@ -311,6 +572,13 @@ def page_to_markdown(lines, force_biggest=None):
 
     out = []
     for block in blocks:
+        if looks_like_ascii_art(block) and use_mermaid:
+            raw_lines = [l["text"].strip() for l in block if l["text"].strip()]
+            is_diag, mermaid_code = parse_ascii_diagram_to_mermaid(raw_lines)
+            if is_diag:
+                out.append("```mermaid\n" + mermaid_code + "\n```")
+                continue
+
         if looks_like_code(block, gutter_idx) or looks_like_ascii_art(block):
             code = []
             for l in block:
@@ -320,7 +588,10 @@ def page_to_markdown(lines, force_biggest=None):
                 if t:
                     code.append(t)
             if code:
-                out.append("```\n" + "\n".join(code) + "\n```")
+                code_text = "\n".join(code)
+                lang = estimate_code_language(code_text)
+                fence = f"```{lang}" if lang else "```"
+                out.append(f"{fence}\n{code_text}\n```")
         else:
             md = render_block(block, median_height, max_size)
             if md:
@@ -328,9 +599,38 @@ def page_to_markdown(lines, force_biggest=None):
     return "\n\n".join(out)
 
 
-def find_boxes(dark, min_w_frac=0.15, min_h=40):
+# ---------------------------------------------------------------------------
+# Robust Bordered Box Region Pass
+# ---------------------------------------------------------------------------
+def check_vstrip_continuous(dark, y1, y2, x_center, half_w=10, max_break=30):
+    """Verify that a vertical column strip has a continuous dark border run,
+    tolerating slight scan rotation and minute sensor breaks."""
+    H, W = dark.shape
+    y_start = max(0, int(y1))
+    y_end = min(H, int(y2))
+    if y_end <= y_start + 20:
+        return False
+    x_start = max(0, int(x_center - half_w))
+    x_end = min(W, int(x_center + half_w + 1))
+    strip = dark[y_start:y_end, x_start:x_end]
+    has_pixel = numpy.any(strip, axis=1)
+    if numpy.mean(has_pixel) < 0.70:
+        return False
+    gap = 0
+    for p in has_pixel:
+        if not p:
+            gap += 1
+            if gap > max_break:
+                return False
+        else:
+            gap = 0
+    return True
+
+
+def find_boxes(dark, min_w_frac=BOX_MIN_W_FRAC, min_h=BOX_MIN_H, max_gap=BOX_MAX_GAP):
     """Detect rectangular bordered regions (code boxes, boxed diagrams)
-    in a binary dark-pixel mask. Returns (y0, y1, x0, x1) tuples."""
+    in a binary dark-pixel mask, robust against slight scan skew and noise.
+    Returns (y0, y1, x0, x1) tuples."""
     H, W = dark.shape
 
     def hline_runs(y):
@@ -340,27 +640,21 @@ def find_boxes(dark, min_w_frac=0.15, min_h=40):
         while x < W:
             if row[x]:
                 s = x
-                while x < W and row[x]:
-                    x += 1
+                while x < W:
+                    if row[x]:
+                        x += 1
+                    else:
+                        gap = 1
+                        while gap <= max_gap and x + gap < W and not row[x + gap]:
+                            gap += 1
+                        if gap <= max_gap and x + gap < W and row[x + gap]:
+                            x += gap
+                        else:
+                            break
                 if x - s > W * min_w_frac:
                     runs.append((s, x))
             else:
                 x += 1
-        return runs
-
-    def vline_runs(x):
-        col = dark[:, x]
-        runs = []
-        y = 0
-        while y < H:
-            if col[y]:
-                s = y
-                while y < H and col[y]:
-                    y += 1
-                if y - s > min_h:
-                    runs.append((s, y))
-            else:
-                y += 1
         return runs
 
     segs = []
@@ -381,31 +675,53 @@ def find_boxes(dark, min_w_frac=0.15, min_h=40):
             if used[j]:
                 continue
             y2, s2, e2 = segs[j]
-            if y2 <= max(ys) + 6 and abs(s2 - s0) < 12 and abs(e2 - e0) < 12:
-                used[j] = True
-                ys.append(y2)
+            if y2 <= max(ys) + 8:
+                overlap = max(0, min(e0, e2) - max(s0, s2))
+                adjacent = (abs(s2 - e0) <= 25 or abs(s0 - e2) <= 25)
+                if overlap > 0 or adjacent:
+                    used[j] = True
+                    ys.append(y2)
+                    s0 = min(s0, s2)
+                    e0 = max(e0, e2)
         merged.append((sum(ys) / len(ys), s0, e0))
 
+    stitched = []
+    used_m = [False] * len(merged)
+    merged.sort(key=lambda m: (m[1], m[0]))
+    for i, (y, s, e) in enumerate(merged):
+        if used_m[i]:
+            continue
+        cur_y, cur_s, cur_e = y, s, e
+        used_m[i] = True
+        for j in range(len(merged)):
+            if used_m[j]:
+                continue
+            y2, s2, e2 = merged[j]
+            if abs(y2 - cur_y) <= 12 and (cur_s - 40 <= e2 and s2 <= cur_e + 40):
+                used_m[j] = True
+                cur_y = (cur_y + y2) / 2
+                cur_s = min(cur_s, s2)
+                cur_e = max(cur_e, e2)
+        stitched.append((cur_y, cur_s, cur_e))
+
     boxes = []
-    for y, s, e in merged:
-        for y2, s2, e2 in merged:
-            if min_h * 0.6 < y2 - y and abs(s2 - s) < 12 and abs(e2 - e) < 12:
-                lv = rv = False
-                for dx in range(-6, 7):
-                    for a, b in vline_runs(s + dx):
-                        if a <= y + 6 and b >= y2 - 6:
-                            lv = True
-                    for a, b in vline_runs(e + dx):
-                        if a <= y + 6 and b >= y2 - 6:
-                            rv = True
+    for y, s, e in stitched:
+        if e - s < W * 0.35:
+            continue
+        for y2, s2, e2 in stitched:
+            if y2 - y > min_h and abs(s2 - s) < BOX_TOLERANCE_PX and abs(e2 - e) < BOX_TOLERANCE_PX:
+                box_s = min(s, s2)
+                box_e = max(e, e2)
+                lv = check_vstrip_continuous(dark, y, y2, box_s)
+                rv = check_vstrip_continuous(dark, y, y2, box_e)
                 if lv and rv:
-                    boxes.append((y, y2, s, e))
+                    boxes.append((y, y2, box_s, box_e))
 
     boxes.sort(key=lambda b: (b[0], -(b[1] - b[0])))
     final = []
     for b in boxes:
-        if not any(b[0] >= f[0] - 5 and b[1] <= f[1] + 5 and
-                   b[2] >= f[2] - 5 and b[3] <= f[3] + 5 for f in final):
+        if not any(b[0] >= f[0] - 10 and b[1] <= f[1] + 10 and
+                   b[2] >= f[2] - 10 and b[3] <= f[3] + 10 for f in final):
             final.append(b)
     return final
 
@@ -419,10 +735,8 @@ def ocr_region(img, lang, config):
             tmp_path, lang=lang, config=config
         )
     finally:
-        os.unlink(tmp_path)
-
-
-BOX_BORDER_PAD = 8
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 def process_page_regions(page, dpi, lang):
@@ -462,26 +776,41 @@ def ocr_masked_page(img, box_results, dpi, lang):
             output_type=pytesseract.Output.DICT,
         )
     finally:
-        os.unlink(tmp_path)
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
     return lines_from_ocr(data)
 
 
 def clean_box_text(text):
     """Normalize a box's OCR text: strip gutter numbers at line starts,
-    drop empty lines."""
+    preserve code indentation, drop empty lines, and remove bare
+    gutter-number lines (code lines whose text OCR failed to see)."""
     out = []
     for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
+        if not raw.strip():
             continue
-        m = re.match(r"^(\d{1,3})[.)]?\s+(\S.*)$", line)
+        m = re.match(r"^\s*(\d{1,3})[.)]?[ \t](.*)$", raw)
         if m:
-            line = m.group(2)
-        out.append(line)
+            line = m.group(2).rstrip()
+        else:
+            line = raw.strip()
+        # A bare number is a gutter line for an empty/unread code line.
+        if re.fullmatch(r"\d{1,3}[.)]?", line):
+            continue
+        # OCR sometimes glues a bare number from the next gutter line onto
+        # the end of content (e.g. 'pass3', '}5'). Split it off when the
+        # preceding text is not itself numeric.
+        m2 = re.match(r"^(.*\S)(\s*)(\d{1,2})$", line)
+        if m2:
+            stem = m2.group(1)
+            if re.search(r"[})\]]$", stem):
+                line = stem.rstrip()
+        if line:
+            out.append(line)
     return "\n".join(out)
 
 
-def merge_regions(prose_lines, box_results, dpi, lang):
+def merge_regions(prose_lines, box_results, dpi, lang, use_mermaid=True):
     """Combine prose and fenced box blocks in top-to-bottom order.
     Prose lines are grouped into gap-separated blocks, each rendered to
     Markdown, and interleaved with boxes by pixel y-position."""
@@ -489,14 +818,22 @@ def merge_regions(prose_lines, box_results, dpi, lang):
     for (y0, y1, x0, x1), text in box_results:
         cleaned = clean_box_text(text)
         if cleaned:
-            events.append((y0, 0, "box", "```\n" + cleaned + "\n```"))
+            # Check if box text is a diagram and should be converted to Mermaid
+            if use_mermaid:
+                is_diag, mermaid_code = parse_ascii_diagram_to_mermaid(cleaned.splitlines())
+                if is_diag:
+                    events.append((y0, 0, "box", "```mermaid\n" + mermaid_code + "\n```"))
+                    continue
+            lang_tag = estimate_code_language(cleaned)
+            fence = f"```{lang_tag}" if lang_tag else "```"
+            events.append((y0, 0, "box", f"{fence}\n{cleaned}\n```"))
 
     if prose_lines:
         heights = sorted(l["height"] for l in prose_lines)
         median_height = heights[len(heights) // 2] or 1
         blocks = group_into_paragraphs(prose_lines, median_height)
         for block in blocks:
-            md = page_to_markdown(block)
+            md = page_to_markdown(block, use_mermaid=use_mermaid)
             if md:
                 events.append((block[0]["top"], block[-1]["bottom"], "prose", md))
 
@@ -504,7 +841,7 @@ def merge_regions(prose_lines, box_results, dpi, lang):
     return "\n\n".join(e[3] for e in events)
 
 
-def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images):
+def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_mermaid=True):
     if not os.path.isfile(pdf_path):
         sys.exit(f"File not found: {pdf_path}")
     try:
@@ -528,12 +865,12 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images):
             if box_results:
                 src = "OCR + box regions"
                 prose_lines = ocr_masked_page(img, box_results, dpi, lang)
-                text = merge_regions(prose_lines, box_results, dpi, lang)
+                text = merge_regions(prose_lines, box_results, dpi, lang, use_mermaid=use_mermaid)
             else:
                 lines = lines_from_ocr(ocr_page(page, dpi, lang))
-                text = page_to_markdown(lines)
+                text = page_to_markdown(lines, use_mermaid=use_mermaid)
         else:
-            text = page_to_markdown(lines)
+            text = page_to_markdown(lines, use_mermaid=use_mermaid)
         parts.append(f"<!-- page {pno} ({src}) -->\n")
         if text:
             parts.append(text)
@@ -555,6 +892,31 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images):
     return out_path
 
 
+def configure_tesseract():
+    """Auto-detect and configure tesseract binary across Windows, macOS, and Linux."""
+    if os.environ.get("TESSERACT_CMD"):
+        pytesseract.pytesseract.tesseract_cmd = os.environ["TESSERACT_CMD"]
+        return
+    # Check if tesseract is in PATH
+    which_cmd = shutil.which("tesseract")
+    if which_cmd:
+        pytesseract.pytesseract.tesseract_cmd = which_cmd
+        return
+    # Standard Windows install locations
+    if sys.platform == "win32":
+        for win_path in [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
+        ]:
+            if os.path.isfile(win_path):
+                pytesseract.pytesseract.tesseract_cmd = win_path
+                return
+
+
+configure_tesseract()
+
+
 def main():
     ap = argparse.ArgumentParser(description="Convert a scanned PDF to Markdown via OCR.")
     ap.add_argument("pdf", help="Input PDF path")
@@ -565,13 +927,14 @@ def main():
                     help="Use the PDF's embedded text layer when present instead of OCR. "
                          "Caution: scanned PDFs often embed a low-quality OCR layer.")
     ap.add_argument("--save-images", metavar="DIR", help="Also save page images to DIR")
+    ap.add_argument("--no-mermaid", action="store_true",
+                    help="Disable automatic Mermaid diagram conversion for flowcharts and tree diagrams.")
     args = ap.parse_args()
 
-    if os.environ.get("TESSERACT_CMD"):
-        pytesseract.pytesseract.tesseract_cmd = os.environ["TESSERACT_CMD"]
+    configure_tesseract()
 
     out = args.output or os.path.splitext(args.pdf)[0] + ".md"
-    convert(args.pdf, out, args.lang, args.dpi, args.prefer_text_layer, args.save_images)
+    convert(args.pdf, out, args.lang, args.dpi, args.prefer_text_layer, args.save_images, use_mermaid=not args.no_mermaid)
 
 
 if __name__ == "__main__":
