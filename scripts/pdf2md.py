@@ -8,13 +8,14 @@ Usage:
     python pdf2md.py input.pdf [-o output.md] [--lang eng] [--dpi 300]
                                [--force-ocr] [--save-images DIR]
 
-Requires: pymupdf (pip install pymupdf), and the tesseract binary
-(e.g. `apt install tesseract-ocr` or `brew install tesseract`) when OCR
-is needed. If tesseract is not on PATH, set the TESSERACT_CMD
-environment variable to its full path.
+Requires: pymupdf (pip install pymupdf), numpy (pip install numpy), and
+the tesseract binary (e.g. `apt install tesseract-ocr` or `brew install
+tesseract`) when OCR is needed. If tesseract is not on PATH, set the
+TESSERACT_CMD environment variable to its full path.
 """
 
 import argparse
+import io
 import os
 import re
 import sys
@@ -28,6 +29,10 @@ try:
     import pytesseract
 except ImportError:
     sys.exit("Missing dependency: run `pip install pytesseract`")
+try:
+    import numpy
+except ImportError:
+    sys.exit("Missing dependency: run `pip install numpy`")
 
 MIN_TEXT_CHARS = 30
 
@@ -199,11 +204,48 @@ def render_block(block, median_height, max_size):
                 items.append(f"- {m.group(2).strip()}")
         return "\n".join(items)
 
+    if len(block) >= 3 and looks_like_list(block):
+        items = []
+        for l in block:
+            t = l["text"].strip()
+            m = BULLET_RE.match(t) or BULLET_WORD_RE.match(t)
+            if m:
+                t = m.group(2).strip()
+            if t:
+                items.append(f"- {t}")
+        return "\n".join(items)
+
     if len(texts) > 1 and all(NUMBERED_RE.match(t) for t in texts if t):
         items = [NUMBERED_RE.match(t).group(0) for t in texts if t]
         return "\n".join(items)
 
     return text
+
+
+def looks_like_list(block):
+    """Detect vertical bullet lists where OCR dropped the bullet glyphs:
+    short lines, near-uniform left alignment (within ~30px, since lost
+    bullets shift text left), uniform vertical rhythm."""
+    lefts = [l["left"] for l in block]
+    texts = [l["text"].strip() for l in block]
+    if any(len(t) > 60 for t in texts):
+        return False
+    if max(lefts) - min(lefts) > 30:
+        return False
+    has_marker = any(BULLET_RE.match(t) or BULLET_WORD_RE.match(t) for t in texts)
+    if not has_marker and max(lefts) - min(lefts) > 6:
+        return False
+    if not has_marker:
+        wordish = sum(1 for t in texts if re.match(r"^[A-Za-z][A-Za-z0-9 _/&-]{1,40}$", t))
+        if wordish < max(3, (len(texts) * 3) // 4):
+            return False
+    gaps = [block[i + 1]["top"] - block[i]["bottom"] for i in range(len(block) - 1)]
+    if not gaps:
+        return False
+    avg = sum(gaps) / len(gaps)
+    if not all(abs(g - avg) <= max(8, avg * 0.4) for g in gaps):
+        return False
+    return not any(t.endswith((".", ",", ";", ":")) for t in texts if len(t) > 3)
 
 
 def looks_like_code(lines, gutter_idx):
@@ -286,6 +328,182 @@ def page_to_markdown(lines, force_biggest=None):
     return "\n\n".join(out)
 
 
+def find_boxes(dark, min_w_frac=0.15, min_h=40):
+    """Detect rectangular bordered regions (code boxes, boxed diagrams)
+    in a binary dark-pixel mask. Returns (y0, y1, x0, x1) tuples."""
+    H, W = dark.shape
+
+    def hline_runs(y):
+        row = dark[y]
+        runs = []
+        x = 0
+        while x < W:
+            if row[x]:
+                s = x
+                while x < W and row[x]:
+                    x += 1
+                if x - s > W * min_w_frac:
+                    runs.append((s, x))
+            else:
+                x += 1
+        return runs
+
+    def vline_runs(x):
+        col = dark[:, x]
+        runs = []
+        y = 0
+        while y < H:
+            if col[y]:
+                s = y
+                while y < H and col[y]:
+                    y += 1
+                if y - s > min_h:
+                    runs.append((s, y))
+            else:
+                y += 1
+        return runs
+
+    segs = []
+    for y in range(0, H, 2):
+        for s, e in hline_runs(y):
+            segs.append((y, s, e))
+
+    merged = []
+    used = [False] * len(segs)
+    segs.sort()
+    for i, (y, s, e) in enumerate(segs):
+        if used[i]:
+            continue
+        ys = [y]
+        s0, e0 = s, e
+        used[i] = True
+        for j in range(i + 1, len(segs)):
+            if used[j]:
+                continue
+            y2, s2, e2 = segs[j]
+            if y2 <= max(ys) + 6 and abs(s2 - s0) < 12 and abs(e2 - e0) < 12:
+                used[j] = True
+                ys.append(y2)
+        merged.append((sum(ys) / len(ys), s0, e0))
+
+    boxes = []
+    for y, s, e in merged:
+        for y2, s2, e2 in merged:
+            if min_h * 0.6 < y2 - y and abs(s2 - s) < 12 and abs(e2 - e) < 12:
+                lv = rv = False
+                for dx in range(-6, 7):
+                    for a, b in vline_runs(s + dx):
+                        if a <= y + 6 and b >= y2 - 6:
+                            lv = True
+                    for a, b in vline_runs(e + dx):
+                        if a <= y + 6 and b >= y2 - 6:
+                            rv = True
+                if lv and rv:
+                    boxes.append((y, y2, s, e))
+
+    boxes.sort(key=lambda b: (b[0], -(b[1] - b[0])))
+    final = []
+    for b in boxes:
+        if not any(b[0] >= f[0] - 5 and b[1] <= f[1] + 5 and
+                   b[2] >= f[2] - 5 and b[3] <= f[3] + 5 for f in final):
+            final.append(b)
+    return final
+
+
+def ocr_region(img, lang, config):
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        img.save(tmp)
+        tmp_path = tmp.name
+    try:
+        return pytesseract.image_to_string(
+            tmp_path, lang=lang, config=config
+        )
+    finally:
+        os.unlink(tmp_path)
+
+
+BOX_BORDER_PAD = 8
+
+
+def process_page_regions(page, dpi, lang):
+    """Detect bordered boxes on the page image. Returns (PIL image,
+    list of (box, ocr_text)). Boxes are OCR'd with PSM 6 (uniform block)
+    which preserves line-by-line structure for code and tree diagrams."""
+    from PIL import Image
+
+    pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
+    img = Image.open(io.BytesIO(pix.tobytes("png")))
+    dark = numpy.array(img) < 128
+    boxes = find_boxes(dark)
+    results = []
+    for y0, y1, x0, x1 in boxes:
+        crop = img.crop((x0 + BOX_BORDER_PAD, y0 + BOX_BORDER_PAD,
+                         x1 - BOX_BORDER_PAD, y1 - BOX_BORDER_PAD))
+        text = ocr_region(crop, lang, "--psm 6")
+        results.append(((y0, y1, x0, x1), text))
+    return img, results
+
+
+def ocr_masked_page(img, box_results, dpi, lang):
+    """OCR the full page with box interiors whited out, returning the
+    normal line records for the prose regions."""
+    from PIL import ImageDraw
+
+    masked = img.copy()
+    draw = ImageDraw.Draw(masked)
+    for (y0, y1, x0, x1), _ in box_results:
+        draw.rectangle((x0 - 2, y0 - 2, x1 + 2, y1 + 2), fill=255)
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        masked.save(tmp)
+        tmp_path = tmp.name
+    try:
+        data = pytesseract.image_to_data(
+            tmp_path, lang=lang, config="--psm 3",
+            output_type=pytesseract.Output.DICT,
+        )
+    finally:
+        os.unlink(tmp_path)
+    return lines_from_ocr(data)
+
+
+def clean_box_text(text):
+    """Normalize a box's OCR text: strip gutter numbers at line starts,
+    drop empty lines."""
+    out = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = re.match(r"^(\d{1,3})[.)]?\s+(\S.*)$", line)
+        if m:
+            line = m.group(2)
+        out.append(line)
+    return "\n".join(out)
+
+
+def merge_regions(prose_lines, box_results, dpi, lang):
+    """Combine prose and fenced box blocks in top-to-bottom order.
+    Prose lines are grouped into gap-separated blocks, each rendered to
+    Markdown, and interleaved with boxes by pixel y-position."""
+    events = []
+    for (y0, y1, x0, x1), text in box_results:
+        cleaned = clean_box_text(text)
+        if cleaned:
+            events.append((y0, 0, "box", "```\n" + cleaned + "\n```"))
+
+    if prose_lines:
+        heights = sorted(l["height"] for l in prose_lines)
+        median_height = heights[len(heights) // 2] or 1
+        blocks = group_into_paragraphs(prose_lines, median_height)
+        for block in blocks:
+            md = page_to_markdown(block)
+            if md:
+                events.append((block[0]["top"], block[-1]["bottom"], "prose", md))
+
+    events.sort(key=lambda e: e[0])
+    return "\n\n".join(e[3] for e in events)
+
+
 def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images):
     if not os.path.isfile(pdf_path):
         sys.exit(f"File not found: {pdf_path}")
@@ -304,13 +522,18 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images):
                 used_text_layer = True
             else:
                 lines = []
+        src = "text layer" if used_text_layer else "OCR"
         if not used_text_layer:
-            lines = lines_from_ocr(ocr_page(page, dpi, lang))
-            src = "OCR"
+            img, box_results = process_page_regions(page, dpi, lang)
+            if box_results:
+                src = "OCR + box regions"
+                prose_lines = ocr_masked_page(img, box_results, dpi, lang)
+                text = merge_regions(prose_lines, box_results, dpi, lang)
+            else:
+                lines = lines_from_ocr(ocr_page(page, dpi, lang))
+                text = page_to_markdown(lines)
         else:
-            src = "text layer"
-
-        text = page_to_markdown(lines)
+            text = page_to_markdown(lines)
         parts.append(f"<!-- page {pno} ({src}) -->\n")
         if text:
             parts.append(text)
