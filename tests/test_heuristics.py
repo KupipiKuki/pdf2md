@@ -12,6 +12,8 @@ from pdf2md import (
     estimate_code_language,
     parse_ascii_diagram_to_mermaid,
     clean_box_text,
+    box_gutter_range,
+    boxes_continuing,
     detect_gutters,
     looks_like_list,
     looks_like_code,
@@ -171,6 +173,43 @@ class TestLayoutHeuristics(unittest.TestCase):
         self.assertIn("Detect diagram region", texts)
         self.assertIn("Send crop to VLM", texts)
         self.assertNotIn("Pp", texts)
+
+
+class TestCrossPageContinuation(unittest.TestCase):
+    def test_box_gutter_range(self):
+        text = "9 {\n\n10 \"id\": \"T1\",\n\n22 }\n"
+        self.assertEqual(box_gutter_range(text), (9, 22))
+
+    def test_box_gutter_range_none(self):
+        self.assertIsNone(box_gutter_range("no numbers here\n"))
+
+    def test_continuation_by_gutter_sequence(self):
+        prev_state = ((2403, 2922, 413, 2131), "7 \"kv\": 13.8\n8 }", True, 3300)
+        boxes = [((317, 1226, 420, 2150), "9 {\n10 \"id\": \"T1\","),
+                 ((1619, 1685, 422, 2140), "1 import networkx as nx")]
+        cont, rest = boxes_continuing(prev_state, boxes)
+        self.assertEqual(len(cont), 1)
+        self.assertEqual(cont[0][0], (317, 1226, 420, 2150))
+        self.assertEqual(len(rest), 1)
+
+    def test_no_continuation_when_gutter_restarts(self):
+        prev_state = ((2403, 2922, 413, 2131), "7 \"kv\": 13.8\n8 }", False, 3300)
+        boxes = [((317, 1226, 420, 2150), "1 {\n2 \"id\": \"G\",")]
+        cont, rest = boxes_continuing(prev_state, boxes)
+        self.assertEqual(cont, [])
+        self.assertEqual(len(rest), 1)
+
+    def test_no_continuation_x_mismatch(self):
+        prev_state = ((100, 200, 413, 700), "7 x\n8 y", True, 3300)
+        boxes = [((317, 1226, 1500, 2150), "9 {\n10 \"id\": \"T1\",")]
+        cont, rest = boxes_continuing(prev_state, boxes)
+        self.assertEqual(cont, [])
+
+    def test_no_state_no_continuation(self):
+        boxes = [((317, 1226, 420, 2150), "9 {\n10 \"id\": \"T1\",")]
+        cont, rest = boxes_continuing(None, boxes)
+        self.assertEqual(cont, [])
+        self.assertEqual(rest, boxes)
 
 
 if __name__ == "__main__":

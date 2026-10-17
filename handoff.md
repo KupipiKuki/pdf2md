@@ -122,6 +122,36 @@ top of this branch:
   brace, math-token preservation, real-digit preservation); suite is
   now 17 tests, all passing, smoke test passing.
 
+## 3c. Cross-Page Continuation Pass
+
+User-observed issues after the audit merge, all fixed:
+
+- **Split code boxes merged.** The page-2→3 JSON block (gutters 1–8 then
+  9–22) and the page-3→4 "Positive Sequence" math block (gutters 1–6
+  then 7–9) are now detected as continuations by `boxes_continuing`
+  (x-extent overlap >= 60%, top-of-page position, gutter-number sequence
+  gap <= 4) and merged into a single fenced block on the earlier page.
+  Merged blocks are re-rendered through the same path as fresh boxes
+  (Mermaid synthesis first, then language tagging), so a tree diagram
+  split across pages 5–6 renders as one `flowchart TD`.
+- **Root cause of the missing Positive Sequence content**: `find_boxes`
+  paired top/bottom borders by endpoint equality (tolerance 85 px); on
+  this scan the skewed top border of that box starts ~140 px right of
+  the bottom border. Pairing now uses >= 50% horizontal overlap instead,
+  which also found the box on page 1 and page 5 x-extent variants.
+- **Box masking covers continuation boxes**, so consumed content cannot
+  re-enter the output through the prose pass.
+- **Glued '+' repairs**: OCR reading a gutter digit as '+' before a
+  closing brace (`22 }` -> `+}`) is now cleaned to `}`; the earlier
+  trailing-digit strip stays conservative (only after `}`/`)`) because a
+  broader rule truncated real math tokens (`XT2` -> `XT`).
+- Known accepted: `rating mva: 102` (real `100,`; Tesseract `,`->`5`
+  confusion is upstream), residual glyph noise inside the page-3 JSON
+  box, and imperfect edge reconstruction in the merged page-5→6
+  Mermaid tree (branch glyph misreads change parent-child edges).
+- Tests: 6 new unit tests for `box_gutter_range`/`boxes_continuing`
+  (suite: 23 tests, all passing); smoke test passing.
+
 ## 4. Branch & Git History
 
 - **Branch Name:** `vibe/mermaid-lang-detect-and-optimizations`

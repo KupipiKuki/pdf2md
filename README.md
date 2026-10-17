@@ -51,6 +51,10 @@ If the `tesseract` binary is not on your `PATH`, point to it with the
    - Bullet lists are detected across OCR variants of `•` (`e`, `o`, `©`).
    - ASCII flowcharts (pipes, `Vv`, `L_`, box-drawing characters) are
      fenced to preserve their layout.
+4. **Cross-page continuation**: bordered boxes split by a page break are
+   matched by x-extent overlap and gutter-number sequence, and merged
+   into a single fenced block (re-rendered, e.g. as Mermaid when
+   applicable) on the earlier page.
 
 ## Tests
 
