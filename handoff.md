@@ -104,3 +104,147 @@ SMOKE TEST PASSED
   - `tests/smoke_test.py`: Cross-platform temp path and dynamic tesseract configuration.
   - `tests/test_heuristics.py`: 13 pure-geometry heuristic unit tests.
   - `output.md`: Refreshed with the enhanced pipeline output.
+
+---
+
+## 5. Function-by-Function Diff Report
+
+This section isolates each changed or added function so the primary coder can analyze individual modifications directly without wading through the full 900-line codebase.
+
+### 1. `estimate_code_language(code)` [NEW]
+* **Location:** [`scripts/pdf2md.py:L182-L244`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py#L182-L244)
+* **Purpose:** Replaces bare ```` ``` ```` fences with estimated language tags (`json`, `python`, `mermaid`, `yaml`, `bash`, `text`).
+* **Logic:** Checks strict/structural JSON (including unbracketed snippets), Python keywords and domain patterns (`Transformer(name=...)`, `if transformer...:`), Mermaid diagrams, and Bash commands. Includes a prose detector guard to prevent English prompt sentences from being misidentified as YAML.
+```python
+def estimate_code_language(code):
+    if not code or not code.strip():
+        return ""
+    text = code.strip()
+    if re.match(r"^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|mindmap)\b", text):
+        return "mermaid"
+    if text[0] in ("{", "["): ... # json detection
+    if len(re.findall(r'"[\w\s.-]+"\s*:\s*("[^"]*"|\d+|true|false|null)', text)) >= 2: return "json"
+    if py_score >= 1 ...: return "python"
+    ...
+```
+
+### 2. `parse_ascii_diagram_to_mermaid(lines)` [NEW]
+* **Location:** [`scripts/pdf2md.py:L247-L380`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py#L247-L380)
+* **Purpose:** Parses ASCII flowcharts, box-drawing trees, and linear chains into native Mermaid syntax.
+* **Logic:**
+  1. Detects linear horizontal pipelines (`G | T1 | LINE | T2 | M` $\rightarrow$ `flowchart LR: N1["G"] --> N2["T1"] --> ...`).
+  2. Detects vertical flowcharts with arrows (`|`, `v`, `V`, `Vv`, `▼`, `↓`) and converts to `flowchart TD`.
+  3. Detects tree branches (`├──`, `└──`, `|-`, `L-`, `L_`, `L.`) and establishes parent-child relationships.
+  4. Scoped character cleaning normalizes common OCR defects (`Je Civil Drawing` $\rightarrow$ `Civil Drawing`, `r- P&ID` $\rightarrow$ `P&ID`).
+  5. Negative guards ensure vertical math addition chains (`+`) and bulleted prompt lists are not falsely parsed as diagrams.
+
+### 3. `check_vstrip_continuous(dark, y1, y2, x_center, half_w=10, max_break=30)` [NEW]
+* **Location:** [`scripts/pdf2md.py:L582-L604`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py#L582-L604)
+* **Purpose:** Replaces the single-column vertical border check with a skew- and noise-tolerant band check.
+* **Why:** In real scans, a ~0.2° tilt slopes vertical lines across 5–6 columns over 900 px. Checking a single column $x$ caused all long vertical borders on pages 2, 3, 4, 5, 6 to fail.
+```python
+def check_vstrip_continuous(dark, y1, y2, x_center, half_w=10, max_break=30):
+    strip = dark[int(y1):int(y2), int(x_center - half_w):int(x_center + half_w + 1)]
+    has_pixel = numpy.any(strip, axis=1)
+    if numpy.mean(has_pixel) < 0.70:
+        return False
+    # Verifies maximum break threshold to prevent merging separate stacked boxes
+    ...
+```
+
+### 4. `find_boxes(dark, min_w_frac, min_h, max_gap)` [MODIFIED]
+* **Location:** [`scripts/pdf2md.py:L607-L701`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py#L607-L701)
+* **Purpose:** Finds all bounded boxes on the page mask.
+* **Diff:**
+```diff
+-def find_boxes(dark, min_w_frac=0.15, min_h=40):
++def find_boxes(dark, min_w_frac=BOX_MIN_W_FRAC, min_h=BOX_MIN_H, max_gap=BOX_MAX_GAP):
+     ...
++    # 1. Added max_gap lookahead in hline_runs to bridge 1-3px breaks
++    # 2. Segment clustering stitches adjacent tilted horizontal runs
++    # 3. Replaced vline_runs single-column check with check_vstrip_continuous:
+-    lv = rv = False
+-    for dx in range(-6, 7):
+-        for a, b in vline_runs(s + dx):
+-            if a <= y + 6 and b >= y2 - 6: lv = True
++    lv = check_vstrip_continuous(dark, y, y2, box_s)
++    rv = check_vstrip_continuous(dark, y, y2, box_e)
++    if lv and rv: boxes.append(...)
+```
+
+### 5. `clean_block_lines(block)` [NEW]
+* **Location:** [`scripts/pdf2md.py:L421-L436`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py#L421-L436)
+* **Purpose:** Filters stray 1–2 character OCR artifacts that vertically overlap longer text lines.
+* **Why:** On Page 6, the OCR artifact `Pp` at y=689 overlapped `Detect diagram region` at y=688. This distorted the block coordinate spread and caused `looks_like_list` to reject the block and merge all 6 list items into a single paragraph.
+
+### 6. `render_block(block, median_height, max_size)` [MODIFIED]
+* **Location:** [`scripts/pdf2md.py:L439-L488`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py#L439-L488)
+* **Diff:**
+```diff
+ def render_block(block, median_height, max_size):
+     """Convert one block of lines into Markdown."""
++    block = clean_block_lines(block)
++    if not block:
++        return None
+     texts = [l["text"].strip() for l in block]
+     first = block[0]
+```
+
+### 7. `clean_box_text(text)` [MODIFIED]
+* **Location:** [`scripts/pdf2md.py:L785-L800`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py#L785-L800)
+* **Purpose:** Preserves code block indentation after stripping gutter numbers.
+* **Diff:**
+```diff
+ def clean_box_text(text):
+     out = []
+     for raw in text.splitlines():
+-        line = raw.strip()
+-        if not line:
+-            continue
+-        m = re.match(r"^(\d{1,3})[.)]?\s+(\S.*)$", line)
++        if not raw.strip():
++            continue
++        m = re.match(r"^\s*(\d{1,3})[.)]?[ \t](.*)$", raw)
+         if m:
+-            line = m.group(2)
++            line = m.group(2).rstrip()
++        else:
++            line = raw.strip()
+         out.append(line)
+     return "\n".join(out)
+```
+
+### 8. `merge_regions(...)` & `page_to_markdown(...)` [MODIFIED]
+* **Locations:** [`merge_regions: L802-L828`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py#L802-L828), [`page_to_markdown: L536-L577`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py#L536-L577)
+* **Purpose:** Integrates Mermaid conversion and language estimation into the rendering pipelines.
+* **Diff in `merge_regions`:**
+```diff
+-        events.append((y0, 0, "box", "```\n" + cleaned + "\n```"))
++        if use_mermaid:
++            is_diag, mermaid_code = parse_ascii_diagram_to_mermaid(cleaned.splitlines())
++            if is_diag:
++                events.append((y0, 0, "box", "```mermaid\n" + mermaid_code + "\n```"))
++                continue
++        lang_tag = estimate_code_language(cleaned)
++        fence = f"```{lang_tag}" if lang_tag else "```"
++        events.append((y0, 0, "box", f"{fence}\n{cleaned}\n```"))
+```
+
+### 9. `configure_tesseract()` [NEW]
+* **Location:** [`scripts/pdf2md.py:L862-L883`](file:///o:/Data/Programming/Github/pdf2md/scripts/pdf2md.py#L862-L883)
+* **Purpose:** Automatically locates the Tesseract binary across environments without requiring manual env vars.
+* **Execution:** Executed automatically at module import time and inside `main()`.
+
+### 10. `tests/smoke_test.py` [MODIFIED]
+* **Location:** [`tests/smoke_test.py`](file:///o:/Data/Programming/Github/pdf2md/tests/smoke_test.py)
+* **Diff:**
+```diff
+-TEST_PDF = "/tmp/sample_scan.pdf"
+-OUT_MD = "/tmp/sample_scan.md"
++TEMP_DIR = tempfile.gettempdir()
++TEST_PDF = os.path.join(TEMP_DIR, "sample_scan.pdf")
++OUT_MD = os.path.join(TEMP_DIR, "sample_scan.md")
++TMP_TEXT_PDF = os.path.join(TEMP_DIR, "_text.pdf")
+```
+* Dynamically resolves `TESSERACT_CMD` across platform default paths when not already set in `os.environ`.
+
