@@ -9,7 +9,7 @@ lists, fenced code blocks, and preserved ASCII diagrams.
 ## Install
 
 ```bash
-pip install pymupdf pytesseract
+pip install pymupdf pytesseract numpy
 sudo apt install tesseract-ocr        # Linux; `brew install tesseract` on macOS
 ```
 
@@ -33,8 +33,15 @@ If the `tesseract` binary is not on your `PATH`, point to it with the
 ## How it works
 
 1. **Render** each page to grayscale PNG at the configured DPI (PyMuPDF).
-2. **OCR** with Tesseract (`image_to_data`, PSM 3), keeping word
-   positions and confidences; words below confidence 30 are dropped.
+2. **Detect bordered regions** (code boxes, boxed diagrams) from the
+   page image by finding rectangular border lines. Each box is OCR'd
+   separately with block-mode PSM 6, preserving its line-by-line
+   structure (tree diagrams, vertical chains, code). Boxes are masked
+   out before the prose pass and re-inserted as fenced blocks in
+   reading order.
+3. **OCR** the remaining page with Tesseract (`image_to_data`, PSM 3),
+   keeping word positions and confidences; words below confidence 30
+   are dropped.
 3. **Assemble Markdown** from the word geometry:
    - Words → lines → paragraphs, split on vertical gaps
      (> 1.2 × median line height).
