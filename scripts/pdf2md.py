@@ -783,7 +783,8 @@ def ocr_masked_page(img, box_results, dpi, lang):
 
 def clean_box_text(text):
     """Normalize a box's OCR text: strip gutter numbers at line starts,
-    preserve code indentation, and drop empty lines."""
+    preserve code indentation, drop empty lines, and remove bare
+    gutter-number lines (code lines whose text OCR failed to see)."""
     out = []
     for raw in text.splitlines():
         if not raw.strip():
@@ -793,6 +794,17 @@ def clean_box_text(text):
             line = m.group(2).rstrip()
         else:
             line = raw.strip()
+        # A bare number is a gutter line for an empty/unread code line.
+        if re.fullmatch(r"\d{1,3}[.)]?", line):
+            continue
+        # OCR sometimes glues a bare number from the next gutter line onto
+        # the end of content (e.g. 'pass3', '}5'). Split it off when the
+        # preceding text is not itself numeric.
+        m2 = re.match(r"^(.*\S)(\s*)(\d{1,2})$", line)
+        if m2:
+            stem = m2.group(1)
+            if re.search(r"[})\]]$", stem):
+                line = stem.rstrip()
         if line:
             out.append(line)
     return "\n".join(out)

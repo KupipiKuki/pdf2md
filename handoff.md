@@ -95,6 +95,33 @@ SMOKE TEST PASSED
 
 ---
 
+## 3b. Verification & Hardening Pass (primary coder)
+
+The branch's claims were independently verified against the 6-page test
+PDF, the smoke test, and the unit suite. Findings and fixes applied on
+top of this branch:
+
+- **Verified working:** robust box detection (13 boxes across the doc vs
+  4 before), language tagging (`json`/`python`/`mermaid`), Mermaid
+  synthesis for the page-1 pipeline tree and page-5/6 trees, page-6
+  6-step list reconstruction, indentation preservation, cross-platform
+  tesseract discovery.
+- **Fixed: glued gutter digits in `clean_box_text`.** Raw box OCR emits
+  bare gutter-number lines for empty code lines (e.g. a lone `3`),
+  which survived cleaning and leaked into output; OCR also glues the
+  *next* gutter number onto closing tokens (`}5`). `clean_box_text` now
+  drops bare-number lines and splits glued digits after `}`/`)` only.
+  A first attempt stripped digits after any word char and was rejected —
+  it truncated real math tokens (`XT2` → `XT`); the conservative rule
+  is deliberate.
+- **Not fixable at this layer (accepted):** OCR glyph noise inside the
+  page-3 JSON box (`"transformer", |`, `re", "r1"4`) and mermaid node
+  misreads (`71`/`72` for `T1`/`T2`) — inherent Tesseract quality on
+  the degraded scan, confirmed by OCRing an exact-interior crop by hand.
+- **Tests:** 4 new unit tests for `clean_box_text` (bare gutters, glued
+  brace, math-token preservation, real-digit preservation); suite is
+  now 17 tests, all passing, smoke test passing.
+
 ## 4. Branch & Git History
 
 - **Branch Name:** `vibe/mermaid-lang-detect-and-optimizations`

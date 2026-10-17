@@ -1,4 +1,4 @@
-# electricalDiagramOCR
+# Cz5IuxVR-electricalDiagramOCR
 
 <!-- page 1 (OCR + box regions) -->
 
@@ -69,9 +69,7 @@ Prompt example:
 ```
 Analyze this electrical power-system
 single-line diagram.
-3
 Identify:
-5
 - Components
 - Connectivity
 - Ratings
@@ -79,7 +77,6 @@ Identify:
 - Transformer vector groups
 - Breakers
 - Protective devices
-13
 Return JSON.
 ```
 
@@ -93,7 +90,7 @@ Expected result:
 "type": "generator",
 "rating mva": 102,
 "kv": 13.8
-}5
+}
 ```
 
 <!-- page 3 (OCR + box regions) -->
@@ -105,7 +102,6 @@ Expected result:
 "connection": "delta-grounded_wye" |
 fe }
 ],
-15
 "connections": [
 re", "r1"4,
 ["T1i","LINE"],
@@ -128,14 +124,10 @@ Build:
 ```mermaid
 flowchart TD
     G_1["G"]
-    node_2["71"]
-    LINE_3["LINE"]
-    node_4["72"]
-    M_5["M"]
-    G_1 --> node_2
-    node_2 --> LINE_3
-    LINE_3 --> node_4
-    node_4 --> M_5
+    LINE_2["LINE"]
+    M_3["M"]
+    G_1 --> LINE_2
+    LINE_2 --> M_3
 ```
 
 Then automatically derive:
@@ -182,7 +174,6 @@ An Even Better Approach i'd represent everything in a domain model rather than p
 ```python
 class Generator:
 pass
-3
 ```
 
 <!-- page 5 (OCR + box regions) -->
@@ -190,13 +181,11 @@ pass
 ```python
 class Transformer:
 pass
-6
 class TransmissionLine:
 pass
 :
 class Bus:
 pass
-12
 class Breaker:
 pass
 ```

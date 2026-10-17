@@ -129,6 +129,27 @@ class TestLayoutHeuristics(unittest.TestCase):
         cleaned = clean_box_text(box_ocr)
         self.assertEqual(cleaned, "def run():\n    x = 42\n    return x")
 
+    def test_clean_box_text_bare_gutter_lines(self):
+        box_ocr = "13 class Breaker:\n\n14 pass\n\n3\n"
+        cleaned = clean_box_text(box_ocr)
+        self.assertEqual(cleaned, "class Breaker:\npass")
+
+    def test_clean_box_text_glued_closing_brace(self):
+        box_ocr = "7 \"kv\": 13.8\n\n8 }5\n"
+        cleaned = clean_box_text(box_ocr)
+        self.assertIn("}", cleaned)
+        self.assertNotIn("}5", cleaned)
+
+    def test_clean_box_text_preserves_math_tokens(self):
+        box_ocr = "3 XT2\n4 +\n5 X2(M)\n"
+        cleaned = clean_box_text(box_ocr)
+        self.assertEqual(cleaned, "XT2\n+\nX2(M)")
+
+    def test_clean_box_text_preserves_real_digits(self):
+        box_ocr = "4     x = 123\n5     y = 13.8\n"
+        cleaned = clean_box_text(box_ocr)
+        self.assertEqual(cleaned, "    x = 123\n    y = 13.8")
+
     def test_detect_gutters(self):
         lines = [
             {"text": "1", "left": 100},
