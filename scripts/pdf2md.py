@@ -902,10 +902,101 @@ def ocr_region(img, lang, config):
             os.unlink(tmp_path)
 
 
-def process_page_regions(page, dpi, lang):
+def reconstruct_indented_lines(word_lines):
+    """Reconstruct monospace text lines with their visual indentation from
+    word-level bounding boxes.
+
+    ``word_lines`` is a list of lines, each a list of word dicts with keys
+    ``text``, ``left``, ``top``, ``width``, ``height``. Under PSM 6,
+    Tesseract's image_to_string collapses all intra-line whitespace runs to
+    a single space, permanently losing code indentation; this rebuilds each
+    line from the pixel geometry: indentation is (first_word.left -
+    base_left) / char_w and inter-word gaps are gap_px / char_w, where
+    char_w is the median per-character word width. Gutter number words
+    (bare 1-3 digit tokens at the line start) are stripped from the
+    output and excluded from the code base column, so indentation is
+    measured relative to the first code column.
+    """
+    if not word_lines:
+        return []
+    char_widths = [
+        w["width"] / max(1, len(w["text"]))
+        for line in word_lines for w in line
+        if w["text"].strip()
+    ]
+    char_w = float(numpy.median(char_widths)) if char_widths else 12.0
+    if char_w <= 0:
+        char_w = 12.0
+
+    code_lefts = []
+    for words in word_lines:
+        content = [w for w in words if w["text"].strip()]
+        if content and GUTTER_RE.match(content[0]["text"]):
+            content = content[1:]
+        if content:
+            code_lefts.append(content[0]["left"])
+    base_left = min(code_lefts) if code_lefts else 0
+
+    out = []
+    for words in word_lines:
+        content = [w for w in words if w["text"].strip()]
+        if not content:
+            continue
+        if GUTTER_RE.match(content[0]["text"]):
+            content = content[1:]
+        if not content:
+            continue
+        indent_px = max(0, content[0]["left"] - base_left)
+        indent_spaces = int(round(indent_px / char_w))
+        line_str = " " * indent_spaces + content[0]["text"]
+        for prev_w, curr_w in zip(content[:-1], content[1:]):
+            gap_px = curr_w["left"] - (prev_w["left"] + prev_w["width"])
+            spaces = max(1, int(round(gap_px / char_w)))
+            line_str += (" " * spaces) + curr_w["text"]
+        out.append(line_str)
+    return out
+
+
+def ocr_region_geometry(img, lang, config="--psm 6"):
+    """OCR a region with word-level coordinates and rebuild the text with
+    its visual indentation preserved (see reconstruct_indented_lines)."""
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        img.save(tmp)
+        tmp_path = tmp.name
+    try:
+        data = pytesseract.image_to_data(
+            tmp_path, lang=lang, config=config,
+            output_type=pytesseract.Output.DICT,
+        )
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    lines_by_key = {}
+    for i in range(len(data["text"])):
+        w_text = (data["text"][i] or "").strip()
+        if not w_text:
+            continue
+        key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        lines_by_key.setdefault(key, []).append({
+            "text": w_text,
+            "left": data["left"][i],
+            "top": data["top"][i],
+            "width": data["width"][i],
+            "height": data["height"][i],
+        })
+    word_lines = [lines_by_key[k] for k in
+                  sorted(lines_by_key, key=lambda k: lines_by_key[k][0]["top"])]
+    return "\n".join(reconstruct_indented_lines(word_lines))
+
+
+def process_page_regions(page, dpi, lang, export_crops=None):
     """Detect bordered boxes on the page image. Returns (PIL image,
-    list of (box, ocr_text)). Boxes are OCR'd with PSM 6 (uniform block)
-    which preserves line-by-line structure for code and tree diagrams."""
+    list of (box, ocr_text), crop_paths). Boxes are OCR'd with PSM 6
+    (uniform block) via word-geometry reconstruction, which preserves
+    line-by-line structure and code indentation for code and tree
+    diagrams. When ``export_crops`` is set, each box interior is saved as
+    ``pageN_boxK.png`` and crop_paths maps box coords to the saved path."""
     from PIL import Image
 
     pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
@@ -914,12 +1005,18 @@ def process_page_regions(page, dpi, lang):
     boxes = find_boxes(dark)
     open_bottom, open_top = find_open_boxes(dark, boxes)
     results = []
-    for y0, y1, x0, x1 in boxes + open_bottom + open_top:
+    crop_paths = {}
+    for k, (y0, y1, x0, x1) in enumerate(boxes + open_bottom + open_top, start=1):
         crop = img.crop((x0 + BOX_BORDER_PAD, y0 + BOX_BORDER_PAD,
                          x1 - BOX_BORDER_PAD, y1 - BOX_BORDER_PAD))
-        text = ocr_region(crop, lang, "--psm 6")
+        if export_crops:
+            os.makedirs(export_crops, exist_ok=True)
+            crop_path = os.path.join(export_crops, f"page{page.number + 1}_box{k}.png")
+            crop.save(crop_path)
+            crop_paths[(y0, y1, x0, x1)] = crop_path
+        text = ocr_region_geometry(crop, lang, "--psm 6")
         results.append(((y0, y1, x0, x1), text))
-    return img, results
+    return img, results, crop_paths
 
 
 def ocr_masked_page(img, box_results, dpi, lang):
@@ -1009,12 +1106,19 @@ def clean_box_text(text):
     return "\n".join(out)
 
 
-def merge_regions(prose_lines, box_results, dpi, lang, use_mermaid=True):
+def merge_regions(prose_lines, box_results, dpi, lang, use_mermaid=True, box_overrides=None):
     """Combine prose and fenced box blocks in top-to-bottom order.
     Prose lines are grouped into gap-separated blocks, each rendered to
-    Markdown, and interleaved with boxes by pixel y-position."""
+    Markdown, and interleaved with boxes by pixel y-position.
+    ``box_overrides`` maps box coords to pre-rendered fenced Markdown
+    (e.g. VLM-enriched blocks), which bypasses the OCR render path."""
+    box_overrides = box_overrides or {}
     events = []
     for (y0, y1, x0, x1), text in box_results:
+        override = box_overrides.get((y0, y1, x0, x1))
+        if override:
+            events.append((y0, 0, "box", override))
+            continue
         cleaned = clean_box_text(text)
         if cleaned:
             # Check if box text is a diagram and should be converted to Mermaid
@@ -1085,13 +1189,21 @@ def boxes_continuing(prev_page_state, box_results):
         rest.append((box, text))
     return cont, rest
 
-def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_mermaid=True):
+def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_mermaid=True,
+            export_crops=None, vlm_backend=None):
     if not os.path.isfile(pdf_path):
         sys.exit(f"File not found: {pdf_path}")
     try:
         doc = pymupdf.open(pdf_path)
     except Exception as e:
         sys.exit(f"Cannot open PDF: {e}")
+
+    vlm = None
+    if vlm_backend is not None:
+        from vlm_enrichment import VLMEnricher
+        vlm = VLMEnricher(backend=vlm_backend)
+        if export_crops:
+            vlm.crops_dir = export_crops
 
     parts = [f"# {os.path.splitext(os.path.basename(pdf_path))[0]}", ""]
     open_fence = None       # (tag, [lines]) of a fenced block awaiting continuation
@@ -1113,7 +1225,7 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
         all_boxes = []
         page_h = 0
         if not used_text_layer:
-            img, all_boxes = process_page_regions(page, dpi, lang)
+            img, all_boxes, crop_paths = process_page_regions(page, dpi, lang, export_crops=export_crops)
             page_h = img.size[1]
             cont, standalone = boxes_continuing(prev_page_state, all_boxes)
             if cont and open_fence is not None:
@@ -1144,7 +1256,13 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
             else:
                 prose_lines = []
             if box_results:
-                text = merge_regions(prose_lines, box_results, dpi, lang, use_mermaid=use_mermaid)
+                box_overrides = {}
+                if vlm is not None:
+                    box_overrides = vlm.enrich_box_results(
+                        box_results, crop_paths,
+                        fallback=lambda cleaned: render_box_cleaned(cleaned, use_mermaid))
+                text = merge_regions(prose_lines, box_results, dpi, lang,
+                                     use_mermaid=use_mermaid, box_overrides=box_overrides)
             elif all_boxes:
                 # Every box was consumed as a continuation; the prose pass
                 # still used the masked image, so just render its lines.
@@ -1231,6 +1349,18 @@ def configure_tesseract():
 configure_tesseract()
 
 
+def render_box_cleaned(cleaned, use_mermaid=True):
+    """Render a cleaned box's text to a fenced Markdown block using the
+    standard heuristics (Mermaid synthesis first, then language tag)."""
+    if use_mermaid:
+        is_diag, mermaid_code = parse_ascii_diagram_to_mermaid(cleaned.splitlines())
+        if is_diag:
+            return "```mermaid\n" + mermaid_code + "\n```"
+    lang_tag = estimate_code_language(cleaned)
+    fence = f"```{lang_tag}" if lang_tag else "```"
+    return f"{fence}\n{cleaned}\n```"
+
+
 def main():
     ap = argparse.ArgumentParser(description="Convert a scanned PDF to Markdown via OCR.")
     ap.add_argument("pdf", help="Input PDF path")
@@ -1243,12 +1373,22 @@ def main():
     ap.add_argument("--save-images", metavar="DIR", help="Also save page images to DIR")
     ap.add_argument("--no-mermaid", action="store_true",
                     help="Disable automatic Mermaid diagram conversion for flowcharts and tree diagrams.")
+    ap.add_argument("--export-crops", metavar="DIR",
+                    help="Save every detected box region as an isolated PNG "
+                         "(pageN_boxK.png) for VLM benchmarking and classifier training.")
+    ap.add_argument("--vlm", metavar="BACKEND", default=None,
+                    help="Route detected box crops through a Vision-Language Model "
+                         "for code/diagram transcription. BACKEND is a google-genai "
+                         "model name (e.g. 'gemini-2.5-flash') or 'dryrun' to test "
+                         "routing without API calls.")
     args = ap.parse_args()
 
     configure_tesseract()
 
     out = args.output or os.path.splitext(args.pdf)[0] + ".md"
-    convert(args.pdf, out, args.lang, args.dpi, args.prefer_text_layer, args.save_images, use_mermaid=not args.no_mermaid)
+    convert(args.pdf, out, args.lang, args.dpi, args.prefer_text_layer, args.save_images,
+            use_mermaid=not args.no_mermaid, export_crops=args.export_crops,
+            vlm_backend=args.vlm)
 
 
 if __name__ == "__main__":

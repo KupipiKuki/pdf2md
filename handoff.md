@@ -680,3 +680,49 @@ To evolve the codebase systematically from the current naive baseline to the ful
    - Register as a custom plugin with Docling's `DocumentConverter` pipeline.
 
 
+
+---
+
+## 7. Implementation Pass (primary coder, `vibe/docling-vlm-extension-blueprint`)
+
+Executed the Section 6.5 roadmap in order:
+
+1. **Deterministic code indentation fix.** `ocr_region()`'s PSM 6
+   `image_to_string` call is replaced by `ocr_region_geometry()`, which
+   uses `image_to_data` word coordinates and
+   `reconstruct_indented_lines()` to rebuild each line's exact visual
+   indentation (indent = (first_word.left - base_left) / char_w;
+   inter-word gaps = gap_px / char_w, char_w = median per-character
+   word width). Gutter-number words are stripped and excluded from the
+   code base column. `process_page_regions` now returns
+   `(img, results, crop_paths)`.
+2. **Crop export tooling.** `--export-crops DIR` saves every detected
+   box interior as `pageN_boxK.png` and returns a box-coords -> path
+   map for VLM consumption.
+3. **VLM integration prototype.** `scripts/vlm_enrichment.py` re-exports
+   the `docling_engineering` package; `--vlm BACKEND` routes exported
+   crops through the Mode A/B/C prompts (`gemini-2.5-flash` via
+   google-genai, or `dryrun` to exercise routing without API calls).
+   `merge_regions` accepts `box_overrides` so VLM output bypasses the
+   OCR render path; unenriched boxes fall back to the deterministic
+   rendering. `scripts/benchmark_ref.py` scores any output against
+   `ref_output.md` (current baseline: 0.590 line similarity).
+4. **Docling extension packaging.** New `docling_engineering/` package:
+   `classifier.py` (`FigureClassifier`, six categories, Mode A/B/C
+   routing), `prompts.py` (Section 6.4 Stage 3 prompts), `vlm.py`
+   (`GeminiBackend`/`DryRunBackend`, response post-processing,
+   `VLMEnricher`), `rules.py` (networkx `build_graph`,
+   `sequence_networks`, transformer zero-sequence rules), and
+   `docling_plugin.py` (`EngineeringFigureExtension`, registers with
+   Docling's `DocumentConverter` when docling is installed).
+5. **Tests.** `tests/test_heuristics.py` grew from 24 to 44 tests:
+   word-coordinate indentation reconstruction (4-space Python,
+   2-space JSON, inter-word gaps, gutter exclusion), figure
+   classification, VLM routing/fallback/post-processing, and the
+   networkx rule engine. All pass. End-to-end regeneration of
+   `output.md` requires the 6-page test PDF and the tesseract binary,
+   which are not present in this sandbox; the verification pass should
+   re-run `python scripts/pdf2md.py electricalDiagramOCR.pdf -o output.md`
+   and `python scripts/benchmark_ref.py` to confirm the indentation
+   fix against the reference (expect Page 4 `pass` at 4 spaces and
+   JSON keys at 2 spaces).

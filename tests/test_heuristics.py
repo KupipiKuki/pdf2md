@@ -19,7 +19,13 @@ from pdf2md import (
     looks_like_list,
     looks_like_code,
     clean_block_lines,
+    reconstruct_indented_lines,
 )
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from docling_engineering import FigureClassifier, VLMEnricher
+from docling_engineering.rules import build_graph, sequence_networks, transformer_zero_sequence_rules
+from docling_engineering.vlm import postprocess_mode_a, postprocess_mode_b, postprocess_mode_c
 
 
 class TestLanguageEstimation(unittest.TestCase):
@@ -252,6 +258,145 @@ class TestCrossPageContinuation(unittest.TestCase):
         cont, rest = boxes_continuing(None, boxes)
         self.assertEqual(cont, [])
         self.assertEqual(rest, boxes)
+
+
+class TestIndentationReconstruction(unittest.TestCase):
+    @staticmethod
+    def w(text, left, width, top=100):
+        return {"text": text, "left": left, "top": top, "width": width, "height": 20}
+
+    def test_four_space_python_indent(self):
+        # Monospace char width ~12px: 'class' at x=75 is the code base
+        # column; 'pass' at x=178 is ~103px (~8-9 chars) right of it.
+        lines = [
+            [self.w("5", 40, 12), self.w("class", 75, 60)],
+            [self.w("6", 42, 12), self.w("pass", 123, 48)],
+        ]
+        out = reconstruct_indented_lines(lines)
+        self.assertEqual(out[0], "class")
+        self.assertTrue(out[1].startswith(" "))
+        self.assertEqual(out[1].strip(), "pass")
+        # 48px / 12px = 4 spaces of indentation
+        self.assertEqual(len(out[1]) - len(out[1].lstrip()), 4)
+
+    def test_two_space_json_indent(self):
+        lines = [
+            [self.w("1", 40, 12), self.w("{", 64, 12)],
+            [self.w("2", 41, 12), self.w('"figure_type":', 88, 156)],
+            [self.w("3", 39, 12), self.w('"confidence":', 160, 144)],
+        ]
+        out = reconstruct_indented_lines(lines)
+        self.assertEqual(out[0], "{")
+        self.assertEqual(len(out[1]) - len(out[1].lstrip()), 2)
+        self.assertEqual(len(out[2]) - len(out[2].lstrip()), 8)
+
+    def test_inter_word_gap_restored(self):
+        # 'Z_pu=0.10' as one word plus a far-away trailing token
+        lines = [
+            [self.w('name="T1",', 64, 84), self.w("rating_mva=100,", 184, 168)],
+        ]
+        out = reconstruct_indented_lines(lines)
+        # gap = 184 - (64+84) = 36px = 3 chars
+        self.assertIn('name="T1",    rating_mva=100,', out[0])
+
+    def test_gutter_excluded_from_base_column(self):
+        # The code base column is the first NON-gutter token, so a
+        # gutter number at x=40 does not zero the indentation of code.
+        lines = [
+            [self.w("1", 40, 12), self.w("import", 75, 72)],
+            [self.w("2", 41, 12), self.w("nx", 123, 24)],
+        ]
+        out = reconstruct_indented_lines(lines)
+        self.assertEqual(out[0], "import")
+        self.assertEqual(out[1], "    nx")
+
+    def test_empty_input(self):
+        self.assertEqual(reconstruct_indented_lines([]), [])
+
+
+class TestFigureClassifier(unittest.TestCase):
+    def setUp(self):
+        self.clf = FigureClassifier()
+
+    def test_json_box_is_code_listing(self):
+        text = '{\n"figure_type": "electrical_single_line",\n"confidence": 0.94\n}'
+        self.assertEqual(self.clf.classify_text(text), "code_listing")
+
+    def test_python_box_is_code_listing(self):
+        text = "1 class Generator:\n2 pass"
+        self.assertEqual(self.clf.classify_text(text), "code_listing")
+
+    def test_tree_diagram_is_flowchart(self):
+        tree = ["Docling", "L_ EngineeringFigureExtension", "|- Electrical SLD", "|- P&ID"]
+        text = "\n".join(tree)
+        self.assertEqual(self.clf.classify_text(text), "flowchart_or_tree")
+
+    def test_mode_routing(self):
+        self.assertEqual(self.clf.mode_for("code_listing")[0], "A")
+        self.assertEqual(self.clf.mode_for("flowchart_or_tree")[0], "B")
+        self.assertEqual(self.clf.mode_for("electrical_sld")[0], "C")
+        self.assertEqual(self.clf.mode_for("piping_and_instrumentation")[0], "C")
+
+
+class TestVLMEnrichment(unittest.TestCase):
+    def test_dryrun_falls_back(self):
+        enricher = VLMEnricher(backend="dryrun")
+        # No image path: VLM produces nothing -> enrich returns None
+        self.assertIsNone(enricher.enrich("some code text", None))
+
+    def test_enrich_box_results_fallback_rendering(self):
+        enricher = VLMEnricher(backend="dryrun")
+        box_results = [((0, 100, 0, 100), '1 {\n2 "a": 1\n3 }')]
+        overrides = enricher.enrich_box_results(
+            box_results, {},
+            fallback=lambda cleaned: "```json\n" + cleaned + "\n```")
+        box = (0, 100, 0, 100)
+        self.assertIn("```json", overrides[box])
+        self.assertIn('"a": 1', overrides[box])
+
+    def test_postprocess_mode_a(self):
+        self.assertEqual(postprocess_mode_a("```python\nclass X:\n    pass\n```"),
+                         "```\nclass X:\n    pass\n```")
+
+    def test_postprocess_mode_b(self):
+        resp = "```mermaid\nflowchart TD\n    A --> B\n```"
+        self.assertEqual(postprocess_mode_b(resp), resp)
+        bare = "flowchart TD\n    A --> B"
+        self.assertEqual(postprocess_mode_b(bare), resp)
+
+    def test_postprocess_mode_c(self):
+        resp = '{"components": [], "connections": []}'
+        self.assertEqual(postprocess_mode_c(resp),
+                         "```json\n" + resp + "\n```")
+
+
+class TestRuleEngine(unittest.TestCase):
+    TOPOLOGY = {
+        "components": [
+            {"id": "G", "type": "generator", "z_pu": 0.10},
+            {"id": "T1", "type": "transformer", "z_pu": 0.05,
+             "connection": "delta-grounded_wye"},
+            {"id": "LINE", "type": "transmission_line", "z_pu": 0.20},
+            {"id": "M", "type": "motor", "z_pu": 0.15},
+        ],
+        "connections": [["G", "T1"], ["T1", "LINE"], ["LINE", "M"]],
+    }
+
+    def test_build_graph(self):
+        g = build_graph(self.TOPOLOGY)
+        self.assertEqual(set(g.nodes), {"G", "T1", "LINE", "M"})
+        self.assertEqual(g.degree("T1"), 2)
+
+    def test_sequence_network_chain(self):
+        g = build_graph(self.TOPOLOGY)
+        net = sequence_networks(g, "G", "M")
+        self.assertEqual(list(net.nodes), ["G", "T1", "LINE", "M"])
+
+    def test_zero_sequence_rules(self):
+        rules = transformer_zero_sequence_rules(self.TOPOLOGY["components"])
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["component"], "T1")
+        self.assertEqual(rules[0]["rule"], "zero_sequence_blocked")
 
 
 if __name__ == "__main__":

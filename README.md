@@ -26,6 +26,8 @@ python scripts/pdf2md.py input.pdf -o output.md
 | `--dpi N` | Render resolution (default: `300`; use `400` for small print) |
 | `--prefer-text-layer` | Use the PDF's embedded text layer instead of OCR. Caution: scanned PDFs often embed a low-quality OCR layer that is worse than a fresh Tesseract pass. |
 | `--save-images DIR` | Also save page PNGs and embed them in the Markdown |
+| `--export-crops DIR` | Save every detected box region as an isolated PNG (`pageN_boxK.png`) for VLM benchmarking and classifier training |
+| `--vlm BACKEND` | Route detected box crops through a Vision-Language Model for code/diagram transcription. BACKEND is a google-genai model name (e.g. `gemini-2.5-flash`) or `dryrun` to exercise routing without API calls |
 
 If the `tesseract` binary is not on your `PATH`, point to it with the
 `TESSERACT_CMD` environment variable.
@@ -59,8 +61,24 @@ If the `tesseract` binary is not on your `PATH`, point to it with the
 ## Tests
 
 ```bash
+python tests/test_heuristics.py
 python tests/smoke_test.py
+python scripts/benchmark_ref.py
 ```
 
-Builds a synthetic scanned PDF (rasterized, no text layer), converts
-it, and asserts the expected text and structure are recovered.
+`test_heuristics.py` unit-tests the pure heuristics (language estimation,
+Mermaid synthesis, gutter cleaning, cross-page continuation, word-geometry
+indentation reconstruction, figure classification, VLM routing, and the
+networkx rule engine). `smoke_test.py` builds a synthetic scanned PDF
+(rasterized, no text layer), converts it, and asserts the expected text and
+structure are recovered. `benchmark_ref.py` scores `output.md` against
+`ref_output.md` for regression tracking.
+
+## Docling Engineering Extension
+
+The `docling_engineering/` package implements the Engineering Figure
+Extension blueprint: `FigureClassifier` (six figure categories),
+`VLMEnricher` (Mode A/B/C domain prompts; Gemini or dryrun backends),
+`rules.py` (networkx graph builder and transformer zero-sequence rules),
+and `docling_plugin.EngineeringFigureExtension` for registering with
+Docling's `DocumentConverter` pipeline (`pip install docling`, optional).
