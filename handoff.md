@@ -963,3 +963,41 @@ Return to coder (Round 2). Structural regressions from Section 8 are fixed; the 
 
 Tests: 60 -> 63, all passing. Section 9.2-C brace artifacts are
 pre-existing accepted OCR limitations (unchanged by this round).
+
+
+---
+
+## 10. QAQC Final Review of Round-2 Remediation `32ce5cb` (Claude Sonnet) — Verdict: ACCEPT (with minor follow-ups)
+
+### 10.1 Gate Results (independently re-run)
+
+| Check | Result |
+|---|---|
+| Unit suite | **PASS** 63/63 (3 new real-geometry fixture tests) |
+| Smoke test | **PASS** |
+| `pdf2md.py electricalDiagramOCR.pdf` -> `benchmark_ref.py --min-ratio 0.590` | **PASS: 0.708** (exit 0). Progression: baseline 0.590 -> Round 1 0.498 -> Round 1 remediation 0.557 -> Round 2 **0.708**. |
+| `--min-ratio` default restored | **PASS** (committed `output.md` now fails the 0.590 gate at exactly 0.590, i.e. it is the stale baseline; see 10.3) |
+| Page 4 `pass` = 4 spaces | **PASS** (all five `pass` lines at 4; all five `class` lines at 0) |
+| Page 5 `Transformer (` args = 4 spaces | **PASS** (call at 0, args at 4) |
+| JSON keys indentation | **PASS-ish**: page 2 JSON uses 2/4/6 nesting matching the reference; page 1 JSON uses 4 spaces (reference: 2). |
+| Prompt list (`- Components`...) | **PASS** (all at column 0; no more 1-space drift) |
+| Structural content from Section 8 (chains, T1/T2, `Example:` box) | **PASS** (unchanged, still correct) |
+
+The skew-invariant gutter-relative approach with unit snapping fixes the Section 9 blocker. Fixture-based regression tests (`tests/fixtures/*.json`) are the right kind of test.
+
+### 10.2 Residual Defects (non-blocking)
+
+1. **Page 1 JSON indent unit is 4 instead of 2.** Unit snapping chose 4 for a box with a single nesting level; the reference uses 2. Consider preferring 2 when only one indented level exists and the measured offset is < ~3 columns (JSON), or use `estimate_code_language` == json to prefer a 2-space unit.
+2. **Page 2 JSON closing brace of the second object sits at column 0** (`}` after `"connection": ...`), the reference has it at 4. This is the existing `+}`/brace OCR misread handling (position is derived from the repaired token, which has no reliable geometry).
+3. **`re", "r1"4,` line is dropped** from the page 2 `connections` array (previously emitted as noise). Acceptable (it is garbage), but ideally it would be recovered as `["G", "T1"],`. Defer to the VLM path.
+4. Exact line matches remain low (9.3%) because many reference lines include human edits (headings, bold, separators) that OCR cannot produce; line similarity is the better metric.
+
+### 10.3 Housekeeping Required Before Merge
+
+- **`output.md` was not refreshed in the commit.** Section 9.4 item 3 required committing the regenerated `output.md`. The committed file is still the old baseline (0.590 and fails its own gate). Regenerate with `python scripts/pdf2md.py electricalDiagramOCR.pdf -o output.md` and commit it.
+- Live Gemini `--vlm` path remains un-run (needs the user's API key). Run once on the 16 exported crops and compare against `ref_output.md` before enabling by default.
+- Section 9.4 item 4 (decouple shared heuristics from `scripts/pdf2md.py`) is still open; track for the next iteration.
+
+### 10.4 Disposition
+
+**ACCEPT -> forward to the auditor (Flash).** The two blockers (indentation accuracy, acceptance gate) are resolved with measured evidence. The `output.md` refresh and items in 10.2/10.3 can be handled as a small cleanup commit or folded into the next sprint.
