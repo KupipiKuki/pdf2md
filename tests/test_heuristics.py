@@ -608,5 +608,119 @@ class TestRuleEngine(unittest.TestCase):
         self.assertEqual(rules[0]["rule"], "zero_sequence_blocked")
 
 
+class TestVLMBackends(unittest.TestCase):
+    def test_build_backend_none(self):
+        from docling_engineering.vlm import build_backend
+        self.assertIsNone(build_backend(None))
+        self.assertIsNone(build_backend(""))
+        self.assertIsNone(build_backend("none"))
+
+    def test_build_backend_dryrun(self):
+        from docling_engineering.vlm import build_backend, DryRunBackend
+        backend = build_backend("dryrun")
+        self.assertIsInstance(backend, DryRunBackend)
+        self.assertEqual(backend.complete("dummy.png", "prompt"), "")
+
+    def test_build_backend_openai_compat_parsing(self):
+        from docling_engineering.vlm import build_backend, OpenAICompatBackend
+        b1 = build_backend("openai:Qwen3-VL-8B-Instruct@http://localhost:8000/v1")
+        self.assertIsInstance(b1, OpenAICompatBackend)
+        self.assertEqual(b1.model, "Qwen3-VL-8B-Instruct")
+        self.assertEqual(b1.base_url, "http://localhost:8000/v1")
+
+        b2 = build_backend("local:Llama-3.2-11B-Vision@http://127.0.0.1:8080/v1")
+        self.assertIsInstance(b2, OpenAICompatBackend)
+        self.assertEqual(b2.model, "Llama-3.2-11B-Vision")
+        self.assertEqual(b2.base_url, "http://127.0.0.1:8080/v1")
+
+        # Fallback to OPENAI_BASE_URL or default
+        b3 = build_backend("openai:Qwen3-VL-8B-Instruct")
+        self.assertIsInstance(b3, OpenAICompatBackend)
+        self.assertEqual(b3.model, "Qwen3-VL-8B-Instruct")
+        self.assertEqual(b3.base_url, "http://localhost:8000/v1")
+
+    def test_openai_compat_backend_mock_request(self):
+        import io
+        from unittest.mock import patch, MagicMock
+        from docling_engineering.vlm import OpenAICompatBackend
+
+        backend = OpenAICompatBackend(
+            model="Qwen3-VL-8B-Instruct",
+            base_url="http://localhost:8000/v1",
+            api_key="secret-token",
+        )
+
+        mock_resp_data = json.dumps({
+            "choices": [{
+                "message": {"content": "```python\nclass Generator:\n    pass\n```"}
+            }]
+        }).encode("utf-8")
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = mock_resp_data
+        mock_resp.__enter__.return_value = mock_resp
+
+        # Create a tiny 1-pixel dummy PNG
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82")
+            temp_img = f.name
+
+        try:
+            with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+                res = backend.complete(temp_img, "Transcribe this code.")
+                self.assertEqual(res, "```python\nclass Generator:\n    pass\n```")
+                self.assertTrue(mock_urlopen.called)
+                req = mock_urlopen.call_args[0][0]
+                self.assertEqual(req.full_url, "http://localhost:8000/v1/chat/completions")
+                self.assertEqual(req.headers.get("Authorization"), "Bearer secret-token")
+                body = json.loads(req.data.decode("utf-8"))
+                self.assertEqual(body["model"], "Qwen3-VL-8B-Instruct")
+                self.assertEqual(body["messages"][0]["content"][0]["text"], "Transcribe this code.")
+                self.assertTrue(body["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,"))
+        finally:
+            if os.path.isfile(temp_img):
+                os.remove(temp_img)
+
+    def test_openai_compat_backend_error_handling(self):
+        from unittest.mock import patch
+        import urllib.error
+        from docling_engineering.vlm import OpenAICompatBackend
+
+        backend = OpenAICompatBackend(model="Qwen3-VL-8B-Instruct")
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Connection refused")):
+            # When server is down or unreachable, returns empty string without crashing
+            res = backend.complete("nonexistent.png", "prompt")
+            self.assertEqual(res, "")
+
+    def test_granite_backend_mode_routing(self):
+        from docling_engineering.vlm import GraniteDoclingBackend
+        backend = GraniteDoclingBackend()
+        # Mode B and C return "" per Section 11.2
+        self.assertEqual(backend.complete("dummy.png", "Convert to Mermaid flowchart"), "")
+        self.assertEqual(backend.complete("dummy.png", "Extract electrical single-line diagram (SLD)"), "")
+
+    def test_build_backend_auto_selection(self):
+        from unittest.mock import patch
+        from docling_engineering.vlm import build_backend, OpenAICompatBackend, GeminiBackend, DryRunBackend
+
+        # 1. When OPENAI_BASE_URL is set, auto selects OpenAICompatBackend
+        with patch.dict(os.environ, {"OPENAI_BASE_URL": "http://localhost:8000/v1", "OPENAI_MODEL": "Qwen3-VL-8B-Instruct"}, clear=True):
+            backend = build_backend("auto")
+            self.assertIsInstance(backend, OpenAICompatBackend)
+            self.assertEqual(backend.model, "Qwen3-VL-8B-Instruct")
+
+        # 2. When GEMINI_API_KEY is set (and no OPENAI_BASE_URL), auto selects GeminiBackend
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "fake-key"}, clear=True):
+            backend = build_backend("auto")
+            self.assertIsInstance(backend, GeminiBackend)
+
+        # 3. When neither is set and docling VLM not available, falls back to DryRunBackend
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("docling_engineering.vlm.GraniteDoclingBackend._is_docling_vlm_available", return_value=False):
+                backend = build_backend("auto")
+                self.assertIsInstance(backend, DryRunBackend)
+
+
 if __name__ == "__main__":
     unittest.main()

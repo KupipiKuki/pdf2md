@@ -27,10 +27,29 @@ python scripts/pdf2md.py input.pdf -o output.md
 | `--prefer-text-layer` | Use the PDF's embedded text layer instead of OCR. Caution: scanned PDFs often embed a low-quality OCR layer that is worse than a fresh Tesseract pass. |
 | `--save-images DIR` | Also save page PNGs and embed them in the Markdown |
 | `--export-crops DIR` | Save every detected box region as an isolated PNG (`pageN_boxK.png`) for VLM benchmarking and classifier training |
-| `--vlm BACKEND` | Route detected box crops through a Vision-Language Model for code/diagram transcription. BACKEND is a google-genai model name (e.g. `gemini-2.5-flash`) or `dryrun` to exercise routing without API calls |
+| `--vlm [BACKEND]` | Route detected box crops through a Vision-Language Model for code and diagram transcription. Supports local models via `openai:<model>@<url>` (e.g. `openai:Qwen3-VL-8B-Instruct@http://localhost:8000/v1` or `local:<model>`), `granite` for local Docling Granite, `gemini-2.5-flash`, or `auto` / `dryrun`. Omitted = deterministic OCR only. |
 
 If the `tesseract` binary is not on your `PATH`, point to it with the
 `TESSERACT_CMD` environment variable.
+
+### Local LLMs & VLMs (Unsloth, Qwen-VL, HF Llama Windows, Ollama)
+
+`pdf2md` connects to any OpenAI-compatible multimodal endpoint using standard Python library networking (no extra pip packages required):
+
+```bash
+# Unsloth / vLLM (e.g. Qwen3-VL-8B-Instruct) on port 8000:
+python scripts/pdf2md.py input.pdf --vlm openai:Qwen3-VL-8B-Instruct@http://localhost:8000/v1
+
+# Hugging Face Llama for Windows / llama-server on port 8080:
+python scripts/pdf2md.py input.pdf --vlm local:Llama-3.2-11B-Vision@http://localhost:8080/v1
+
+# Ollama on port 11434:
+python scripts/pdf2md.py input.pdf --vlm openai:qwen2.5-vl:7b@http://localhost:11434/v1
+
+# Auto-detection via environment variable:
+export OPENAI_BASE_URL="http://localhost:8000/v1"
+python scripts/pdf2md.py input.pdf --vlm
+```
 
 ## How it works
 

@@ -21,6 +21,10 @@ core = [
 vlm = [
     "google-genai",
 ]
+local = []
+granite = [
+    "docling",
+]
 rules = [
     "networkx",
 ]

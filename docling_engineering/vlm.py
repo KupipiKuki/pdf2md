@@ -1,26 +1,164 @@
-"""VLM backend adapters and enrichment router (handoff Section 6.4/6.5).
+"""VLM backend adapters and enrichment router (handoff Sections 6.4/6.5 and Section 11).
 
 Routes classified figure crops to a multimodal model with the
 Mode A/B/C prompts, post-processes the responses into fenced
 Markdown blocks, and falls back to deterministic rendering when no
 VLM output is available (dryrun backend, missing crop, API error).
+
+Supported backends:
+- Local models (Unsloth Qwen3-VL, Qwen2.5-VL, Llama-Vision, Ollama, vLLM, llama.cpp):
+  via `OpenAICompatBackend` (`openai:<model>@<url>` or `local:<model>@<url>`).
+- Local document conversion:
+  via `GraniteDoclingBackend` (`granite`), using `granite-docling-258M`.
+- Cloud multimodal models:
+  via `GeminiBackend` (`gemini-2.5-flash`, etc.).
+- Auto-resolution:
+  `auto` (checks OPENAI_BASE_URL, GEMINI_API_KEY, Granite, or dryrun).
 """
 
+import base64
 import json
 import os
 import re
 import sys
+import urllib.request
+import urllib.error
 
-try:
-    from pdf2md import clean_box_text, estimate_code_language
-except ImportError:  # executed outside the repo (installed package)
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
-    from pdf2md import clean_box_text, estimate_code_language
+from .heuristics import clean_box_text, estimate_code_language
 from .classifier import FigureClassifier
 from .prompts import MODE_PROMPTS
 from .rules import sequence_markdown
 
 FENCE_RE = re.compile(r"```(\w+)?\n(.*?)```", re.DOTALL)
+
+
+class OpenAICompatBackend:
+    """OpenAI-compatible multimodal backend for local LLMs (Unsloth, vLLM, Ollama,
+    llama.cpp, Hugging Face, LM Studio).
+
+    Works seamlessly with models like Qwen3-VL-8B-Instruct, Qwen2.5-VL, Llama-Vision, etc.
+    Connects to any standard /v1/chat/completions endpoint using standard library
+    urllib.request (zero extra dependencies).
+    """
+
+    TIMEOUT_SECONDS = 60
+
+    def __init__(self, model="Qwen3-VL-8B-Instruct", base_url="http://localhost:8000/v1", api_key=None):
+        self.model = model or "Qwen3-VL-8B-Instruct"
+        self.base_url = (base_url or "http://localhost:8000/v1").rstrip("/")
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "not-needed")
+
+    def complete(self, image_path, prompt):
+        try:
+            with open(image_path, "rb") as f:
+                b64_img = base64.b64encode(f.read()).decode("utf-8")
+
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{b64_img}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "temperature": 0.0,
+                "max_tokens": 2048,
+            }
+            req_data = json.dumps(payload).encode("utf-8")
+            url = f"{self.base_url}/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            }
+            req = urllib.request.Request(url, data=req_data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=self.TIMEOUT_SECONDS) as resp:
+                res_json = json.loads(resp.read().decode("utf-8"))
+                choice = res_json.get("choices", [{}])[0]
+                message = choice.get("message", {})
+                content = message.get("content", "")
+                if isinstance(content, list):
+                    text_parts = [p.get("text", "") for p in content if isinstance(p, dict)]
+                    return "".join(text_parts).strip()
+                return (content or "").strip()
+        except Exception:
+            # Fall back to deterministic OCR rendering on connection error or timeout
+            return ""
+
+
+class GraniteDoclingBackend:
+    """Docling native Granite document model backend (granite-docling-258M).
+
+    Granite-Docling produces DocTags representing document layout and text.
+    It is suited for Mode A (code transcription and indentation preservation).
+    For Mode B (Mermaid) and Mode C (SLD topology JSON), it returns "" to fall
+    back to the deterministic renderer, per Section 11.2.
+    """
+
+    _cached_converter = None
+
+    def __init__(self):
+        pass
+
+    @classmethod
+    def _is_docling_vlm_available(cls):
+        try:
+            from docling.datamodel.base_models import InputFormat  # noqa: F401
+            from docling.pipeline.vlm_pipeline import VlmPipeline  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    @classmethod
+    def get_converter(cls):
+        if cls._cached_converter is not None:
+            return cls._cached_converter
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import VlmPipelineOptions
+        from docling.datamodel.vlm_model_specs import GRANITEDOCLING_TRANSFORMERS
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling.pipeline.vlm_pipeline import VlmPipeline
+
+        opts = VlmPipelineOptions(vlm_options=GRANITEDOCLING_TRANSFORMERS)
+        cls._cached_converter = DocumentConverter(
+            format_options={
+                InputFormat.IMAGE: PdfFormatOption(
+                    pipeline_cls=VlmPipeline, pipeline_options=opts
+                )
+            }
+        )
+        return cls._cached_converter
+
+    def complete(self, image_path, prompt):
+        # Mode B and C return "" per Section 11.2
+        if "Mermaid" in prompt or "single-line diagram" in prompt or "SLD" in prompt:
+            return ""
+        if not self._is_docling_vlm_available():
+            print(
+                "[docling-engineering] Granite backend requested but docling[vlm] is not installed. "
+                "Run `pip install 'docling[vlm]'` or use a local LLM via --vlm openai:<model>.",
+                file=sys.stderr,
+            )
+            return ""
+        try:
+            converter = self.get_converter()
+            doc = converter.convert(image_path).document
+            code_parts = []
+            for item, _ in doc.body.iterate_items():
+                if hasattr(item, "text") and item.text:
+                    code_parts.append(item.text)
+            if not code_parts:
+                return doc.export_to_markdown() or ""
+            return "\n".join(code_parts)
+        except Exception:
+            return ""
 
 
 class GeminiBackend:
@@ -32,11 +170,16 @@ class GeminiBackend:
     TIMEOUT_SECONDS = 60
 
     def __init__(self, model="gemini-2.5-flash"):
-        from google import genai  # deferred import: optional dependency
-        self.client = genai.Client()
+        try:
+            from google import genai  # deferred import: optional dependency
+            self.client = genai.Client()
+        except Exception:
+            self.client = None
         self.model = model
 
     def complete(self, image_path, prompt):
+        if self.client is None:
+            return ""
         try:
             with open(image_path, "rb") as f:
                 image_bytes = f.read()
@@ -64,10 +207,49 @@ class DryRunBackend:
 
 
 def build_backend(name):
+    """Instantiate a VLM backend adapter from a backend specifier string.
+
+    Supported formats:
+    - None / "none": No VLM
+    - "dryrun": Exercises classification and routing, falls back to deterministic OCR
+    - "granite": Docling Granite-Docling local model (Mode A code transcription only)
+    - "gemini-<model>": Google Gemini via google-genai
+    - "openai:<model>@<url>" or "local:<model>@<url>": OpenAI-compatible vision endpoint
+    - "openai:<model>" or "local:<model>": Uses OPENAI_BASE_URL (default http://localhost:8000/v1)
+    - "auto" / "": Auto-resolves in order: OPENAI_BASE_URL -> GEMINI_API_KEY -> Granite -> dryrun
+    """
+    if not name or name == "none":
+        return None
     if name == "dryrun":
         return DryRunBackend()
+    if name == "granite":
+        return GraniteDoclingBackend()
     if name.startswith("gemini"):
         return GeminiBackend(model=name)
+    if name.startswith("openai:") or name.startswith("local:"):
+        spec = name.split(":", 1)[1].strip()
+        if "@" in spec:
+            model, base_url = spec.split("@", 1)
+        else:
+            model = spec
+            base_url = os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1")
+        if not model:
+            model = os.environ.get("OPENAI_MODEL", "Qwen3-VL-8B-Instruct")
+        return OpenAICompatBackend(model=model, base_url=base_url)
+    if name in ("auto", ""):
+        # Check environment in priority order:
+        # 1. Explicit local OpenAI-compatible server configured
+        if os.environ.get("OPENAI_BASE_URL"):
+            model = os.environ.get("OPENAI_MODEL", "Qwen3-VL-8B-Instruct")
+            return OpenAICompatBackend(model=model, base_url=os.environ["OPENAI_BASE_URL"])
+        # 2. Cloud Gemini API key configured
+        if os.environ.get("GEMINI_API_KEY"):
+            return GeminiBackend(model="gemini-2.5-flash")
+        # 3. Docling VLM installed
+        if GraniteDoclingBackend._is_docling_vlm_available():
+            return GraniteDoclingBackend()
+        # 4. Fallback to dryrun with note
+        return DryRunBackend()
     raise ValueError(f"Unknown VLM backend: {name!r}")
 
 
@@ -135,7 +317,7 @@ class VLMEnricher:
             return None
         prompt = MODE_PROMPTS[prompt_key]
         response = ""
-        if image_path and os.path.isfile(image_path):
+        if image_path and os.path.isfile(image_path) and self.backend is not None:
             response = self.backend.complete(image_path, prompt) or ""
         if not response.strip():
             return None

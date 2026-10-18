@@ -6,7 +6,22 @@ Docling's DocumentConverter pipeline (handoff Section 6.4).
 """
 
 from .classifier import FigureClassifier, CATEGORIES
-from .vlm import VLMEnricher, build_backend, GeminiBackend, DryRunBackend
+from .vlm import (
+    VLMEnricher,
+    build_backend,
+    GeminiBackend,
+    DryRunBackend,
+    OpenAICompatBackend,
+    GraniteDoclingBackend,
+)
+from .heuristics import (
+    clean_box_text,
+    estimate_code_language,
+    parse_ascii_diagram_to_mermaid,
+    reconstruct_indented_lines,
+    box_gutter_range,
+    boxes_continuing,
+)
 from .rules import (
     build_graph,
     sequence_networks,
@@ -23,6 +38,14 @@ __all__ = [
     "build_backend",
     "GeminiBackend",
     "DryRunBackend",
+    "OpenAICompatBackend",
+    "GraniteDoclingBackend",
+    "clean_box_text",
+    "estimate_code_language",
+    "parse_ascii_diagram_to_mermaid",
+    "reconstruct_indented_lines",
+    "box_gutter_range",
+    "boxes_continuing",
     "build_graph",
     "sequence_networks",
     "sequence_mermaid",

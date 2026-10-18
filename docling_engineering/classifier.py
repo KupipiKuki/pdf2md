@@ -10,13 +10,7 @@ image handling), so classify() distinguishes them by OCR emptiness /
 non-textual content and mode_for() maps them to a passthrough mode.
 """
 
-try:
-    from pdf2md import clean_box_text, estimate_code_language, parse_ascii_diagram_to_mermaid
-except ImportError:
-    import os
-    import sys
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
-    from pdf2md import clean_box_text, estimate_code_language, parse_ascii_diagram_to_mermaid
+from .heuristics import clean_box_text, estimate_code_language, parse_ascii_diagram_to_mermaid
 
 CATEGORIES = (
     "photograph",
