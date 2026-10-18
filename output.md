@@ -1,4 +1,4 @@
-# Cz5IuxVR-electricalDiagramOCR
+# electricalDiagramOCR
 
 <!-- page 1 (OCR + box regions) -->
 
@@ -43,8 +43,8 @@ Just classify:
 
 ```json
 {
-"figure_type": "electrical_single line",
-"confidence": 0.94
+    "figure_type": "electrical_single line",
+    "confidence": 0.94
 }
 ```
 
@@ -84,25 +84,25 @@ Expected result:
 
 ```json
 {
-"components": [
-{
-"id": "G",
-"type": "generator",
-"rating mva": 102,
-"kv": 13.8
+  "components": [
+    {
+      "id": "G",
+      "type": "generator",
+      "rating mva": 102,
+      "kv": 13.8
+    }
+    {
+      "id": "T1",
+      "type": "transformer", |
+      "connection": "delta-grounded_wye" |
 }
-{
-"id": "T1",
-"type": "transformer", |
-"connection": "delta-grounded_wye" |
-}
-],
-"connections": [
-re", "r1"4,
-["T1i","LINE"],
-["LINE","T2"],
-["T2","M"]
-]
+  ],
+  "connections": [
+    re", "r1"4,
+    ["T1i","LINE"],
+    ["LINE","T2"],
+    ["T2","M"]
+  ]
 }
 ```
 
@@ -169,7 +169,7 @@ Zero Sequence Network Apply transformer rules:
 
 ```python
 if transformer.primary == "delta":
-block zero sequence()
+    block zero sequence()
 ```
 
 Now you are producing engineering knowledge instead of OCR.
@@ -182,16 +182,16 @@ An Even Better Approach i'd represent everything in a domain model rather than p
 
 ```python
 class Generator:
-pass
+    pass
 class Transformer:
-pass
+    pass
 class TransmissionLine:
-pass
+    pass
 :
 class Bus:
-pass
+    pass
 class Breaker:
-pass
+    pass
 ```
 
 <!-- page 5 (OCR + box regions) -->
@@ -202,12 +202,12 @@ Example:
 
 ```
 Transformer (
-name="T1",
-rating mva=100,
-primary_kv=13.8,
-secondary_kv=138,
-vector_group="Dyg",
-Z_pu=@.10
+    name="T1",
+    rating mva=100,
+    primary_kv=13.8,
+    secondary_kv=138,
+    vector_group="Dyg",
+    Z_pu=@.10
 }
 ```
 

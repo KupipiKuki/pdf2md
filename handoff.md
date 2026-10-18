@@ -1064,3 +1064,17 @@ doc = converter.convert(crop_png_path).document
 ### 11.5 Notes for the auditor
 
 Model-quality expectations: Granite-Docling is expected to help only code listings; Mermaid/SLD quality still depends on a general VLM (Gemini now; a local Qwen-VL class model later via `openai:` backend). Choose the local model by running the 16 exported crops through each candidate and scoring against `ref_output.md`.
+
+---
+
+## 12. Architectural Justification: Docling Native vs. Docling + Multimodal VLM
+
+Following the QAQC acceptance in Section 10, a comprehensive architectural evaluation was conducted to determine whether a pure Docling workflow or a Docling + Multimodal VLM workflow is the correct path for future iterations.
+
+The full standalone report is recorded in [`docs/justification_report.md`](docs/justification_report.md).
+
+### Summary of Architectural Verdict
+- **Pure Docling (Option A):** Best-in-class for document reading order, multi-column flows, and table extraction via TableFormer. However, it hits a hard theoretical ceiling on engineering diagrams (SLDs, P&IDs, flowcharts) because these are **spatial graphs with domain semantics, not documents**.
+- **Docling + Multimodal VLM + Rule Engine (Option B — Selected):** Unlocks genuine engineering understanding by having Docling isolate figure crops, routing them through targeted VLM prompts (Mode A code transcription, Mode B Mermaid synthesis, Mode C SLD topology extraction), and feeding the extracted topology into Python engineering rule engines (`networkx`).
+- **Resilience:** Section 11's tiered fallback architecture (`gemini` -> local `openai:` -> local `granite` -> deterministic OCR) guarantees zero-cost offline resilience without sacrificing visual intelligence when VLMs are available.
+
