@@ -5,6 +5,7 @@ import json
 import unittest
 import sys
 import os
+from unittest.mock import MagicMock
 
 # Add scripts directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
@@ -699,6 +700,151 @@ class TestVLMBackends(unittest.TestCase):
         # Mode B and C return "" per Section 11.2
         self.assertEqual(backend.complete("dummy.png", "Convert to Mermaid flowchart"), "")
         self.assertEqual(backend.complete("dummy.png", "Extract electrical single-line diagram (SLD)"), "")
+
+    def test_granite_mode_bc_does_not_import_docling(self):
+        from unittest.mock import patch
+        from docling_engineering.vlm import GraniteDoclingBackend
+        backend = GraniteDoclingBackend()
+        # Mode B/C must return "" before any Docling availability check or import
+        with patch.object(
+            GraniteDoclingBackend, "_is_docling_vlm_available"
+        ) as mock_avail, patch.object(
+            GraniteDoclingBackend, "get_converter"
+        ) as mock_conv:
+            self.assertEqual(backend.complete("dummy.png", "Convert to Mermaid flowchart"), "")
+            self.assertEqual(backend.complete("dummy.png", "Extract electrical single-line diagram (SLD)"), "")
+            mock_avail.assert_not_called()
+            mock_conv.assert_not_called()
+
+    def _install_fake_docling_modules(self, converter_cls):
+        import types
+        fake_modules = {}
+        def make_module(name):
+            mod = types.ModuleType(name)
+            sys.modules[name] = mod
+            fake_modules[name] = mod
+            return mod
+        make_module("docling")
+        make_module("docling.datamodel").base_models = types.ModuleType(
+            "docling.datamodel.base_models"
+        )
+        sys.modules["docling.datamodel.base_models"] = make_module("docling.datamodel.base_models")
+        sys.modules["docling.datamodel.base_models"].InputFormat = MagicMock()
+        sys.modules["docling.datamodel.base_models"].InputFormat.IMAGE = "image"
+        make_module("docling.datamodel.pipeline_options").VlmPipelineOptions = MagicMock()
+        make_module("docling.datamodel.vlm_model_specs").GRANITEDOCLING_TRANSFORMERS = MagicMock()
+        make_module("docling.pipeline").vlm_pipeline = types.ModuleType("docling.pipeline.vlm_pipeline")
+        sys.modules["docling.pipeline.vlm_pipeline"] = make_module("docling.pipeline.vlm_pipeline")
+        sys.modules["docling.pipeline.vlm_pipeline"].VlmPipeline = MagicMock()
+        make_module("docling.document_converter").DocumentConverter = converter_cls
+        sys.modules["docling.document_converter"].PdfFormatOption = MagicMock()
+        return fake_modules
+
+    def test_granite_converter_cached_per_process(self):
+        from unittest.mock import patch, MagicMock
+        from docling_engineering.vlm import GraniteDoclingBackend
+        converter_instance = MagicMock()
+        converter_cls = MagicMock(return_value=converter_instance)
+        fake_modules = self._install_fake_docling_modules(converter_cls)
+        # Reset the class-level cache for a clean slate, restore afterwards
+        saved = GraniteDoclingBackend._cached_converter
+        GraniteDoclingBackend._cached_converter = None
+        try:
+            self.assertTrue(GraniteDoclingBackend._is_docling_vlm_available())
+            c1 = GraniteDoclingBackend.get_converter()
+            c2 = GraniteDoclingBackend.get_converter()
+            self.assertIs(c1, c2)
+            self.assertIs(c1, converter_instance)
+            # The expensive model load happens exactly once per process
+            self.assertEqual(converter_cls.call_count, 1)
+        finally:
+            GraniteDoclingBackend._cached_converter = saved
+            for name in fake_modules:
+                sys.modules.pop(name, None)
+
+    def test_granite_mode_a_extracts_code_with_mock_converter(self):
+        from unittest.mock import patch, MagicMock
+        from docling_engineering.vlm import GraniteDoclingBackend
+        code_item = MagicMock()
+        code_item.text = "class Generator:\n    pass"
+        body = MagicMock()
+        body.iterate_items.return_value = [(code_item, None)]
+        document = MagicMock()
+        document.body = body
+        document.export_to_markdown.return_value = ""
+        converter = MagicMock()
+        converter.convert.return_value.document = document
+        backend = GraniteDoclingBackend()
+        saved = GraniteDoclingBackend._cached_converter
+        GraniteDoclingBackend._cached_converter = converter
+        try:
+            with patch.object(
+                GraniteDoclingBackend, "_is_docling_vlm_available", return_value=True
+            ):
+                result = backend.complete("crop.png", "Transcribe this code listing (Mode A).")
+                self.assertEqual(result, "class Generator:\n    pass")
+                converter.convert.assert_called_once_with("crop.png")
+        finally:
+            GraniteDoclingBackend._cached_converter = saved
+
+    def test_granite_mode_a_convert_failure_returns_empty(self):
+        from unittest.mock import patch, MagicMock
+        from docling_engineering.vlm import GraniteDoclingBackend
+        converter = MagicMock()
+        converter.convert.side_effect = RuntimeError("model load failed")
+        saved = GraniteDoclingBackend._cached_converter
+        GraniteDoclingBackend._cached_converter = converter
+        try:
+            with patch.object(
+                GraniteDoclingBackend, "_is_docling_vlm_available", return_value=True
+            ):
+                backend = GraniteDoclingBackend()
+                self.assertEqual(
+                    backend.complete("crop.png", "Transcribe this code listing (Mode A)."),
+                    "",
+                )
+        finally:
+            GraniteDoclingBackend._cached_converter = saved
+
+    def test_gemini_missing_client_falls_back_to_granite(self):
+        from unittest.mock import patch, MagicMock
+        from docling_engineering.vlm import GeminiBackend
+        backend = GeminiBackend(model="gemini-2.5-flash")
+        self.assertIsNone(backend.client)
+        with patch.object(
+            GeminiBackend, "_fallback_to_granite", create=True
+        ) as mock_fb:
+            mock_fb.return_value = "class Generator:\n    pass"
+            result = backend.complete("crop.png", "Transcribe this code listing (Mode A).")
+            self.assertEqual(result, "class Generator:\n    pass")
+            mock_fb.assert_called_once()
+
+    def test_gemini_call_failure_falls_back_to_granite(self):
+        from unittest.mock import patch, MagicMock
+        from docling_engineering.vlm import GeminiBackend, GraniteDoclingBackend
+        backend = GeminiBackend(model="gemini-2.5-flash")
+        backend.client = MagicMock()
+        backend.client.models.generate_content.side_effect = RuntimeError("API error")
+        with patch.object(GraniteDoclingBackend, "complete", return_value="code") as mock_complete:
+            result = backend.complete("crop.png", "Transcribe this code listing (Mode A).")
+            self.assertEqual(result, "code")
+            mock_complete.assert_called_once()
+            self.assertIsInstance(backend._granite, GraniteDoclingBackend)
+            # Subsequent failures log the fallback warning only once
+            backend.client.models.generate_content.side_effect = RuntimeError("API error")
+            backend.complete("crop.png", "Transcribe this code listing (Mode A).")
+            self.assertEqual(mock_complete.call_count, 2)
+
+    def test_granite_missing_docling_degrades_to_dryrun_without_raising(self):
+        from unittest.mock import patch
+        from docling_engineering.vlm import build_backend, GraniteDoclingBackend, DryRunBackend
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(
+                GraniteDoclingBackend, "_is_docling_vlm_available", return_value=False
+            ):
+                backend = build_backend("auto")
+                self.assertIsInstance(backend, DryRunBackend)
+                self.assertEqual(backend.complete("dummy.png", "prompt"), "")
 
     def test_build_backend_auto_selection(self):
         from unittest.mock import patch

@@ -170,6 +170,8 @@ class GeminiBackend:
     TIMEOUT_SECONDS = 60
 
     def __init__(self, model="gemini-2.5-flash"):
+        self._granite = None
+        self._fallback_warned = False
         try:
             from google import genai  # deferred import: optional dependency
             self.client = genai.Client()
@@ -177,9 +179,21 @@ class GeminiBackend:
             self.client = None
         self.model = model
 
+    def _fallback_to_granite(self, image_path, prompt):
+        if not self._fallback_warned:
+            print(
+                "[docling-engineering] Gemini unavailable or call failed; "
+                "falling back to the Granite backend.",
+                file=sys.stderr,
+            )
+            self._fallback_warned = True
+        if self._granite is None:
+            self._granite = GraniteDoclingBackend()
+        return self._granite.complete(image_path, prompt)
+
     def complete(self, image_path, prompt):
         if self.client is None:
-            return ""
+            return self._fallback_to_granite(image_path, prompt)
         try:
             with open(image_path, "rb") as f:
                 image_bytes = f.read()
@@ -193,9 +207,12 @@ class GeminiBackend:
                 }],
                 config={"http_options": {"timeout": self.TIMEOUT_SECONDS * 1000}},
             )
-            return response.text or ""
+            text = response.text or ""
+            if text.strip():
+                return text
+            return self._fallback_to_granite(image_path, prompt)
         except Exception:
-            return ""
+            return self._fallback_to_granite(image_path, prompt)
 
 
 class DryRunBackend:
