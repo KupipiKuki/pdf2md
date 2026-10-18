@@ -534,13 +534,14 @@ def ocr_region_geometry(img, lang, config="--psm 6"):
     return "\n".join(reconstruct_indented_lines(word_lines))
 
 
-def process_page_regions(page, dpi, lang, export_crops=None):
+def process_page_regions(page, dpi, lang, export_crops=None, temp_crops_dir=None):
     """Detect bordered boxes on the page image. Returns (PIL image,
     list of (box, ocr_text), crop_paths). Boxes are OCR'd with PSM 6
     (uniform block) via word-geometry reconstruction, which preserves
     line-by-line structure and code indentation for code and tree
     diagrams. When ``export_crops`` is set, each box interior is saved as
-    ``pageN_boxK.png`` and crop_paths maps box coords to the saved path."""
+    ``pageN_boxK.png`` and crop_paths maps box coords to the saved path.
+    When ``temp_crops_dir`` is set, crops are saved there temporarily for VLM processing."""
     from PIL import Image
 
     pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
@@ -556,6 +557,11 @@ def process_page_regions(page, dpi, lang, export_crops=None):
         if export_crops:
             os.makedirs(export_crops, exist_ok=True)
             crop_path = os.path.join(export_crops, f"page{page.number + 1}_box{k}.png")
+            crop.save(crop_path)
+            crop_paths[(y0, y1, x0, x1)] = crop_path
+        elif temp_crops_dir:
+            os.makedirs(temp_crops_dir, exist_ok=True)
+            crop_path = os.path.join(temp_crops_dir, f"page{page.number + 1}_box{k}.png")
             crop.save(crop_path)
             crop_paths[(y0, y1, x0, x1)] = crop_path
         text = ocr_region_geometry(crop, lang, "--psm 6")
@@ -638,11 +644,15 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
         sys.exit(f"Cannot open PDF: {e}")
 
     vlm = None
+    temp_crops_dir = None
     if vlm_backend is not None:
         from vlm_enrichment import VLMEnricher
         vlm = VLMEnricher(backend=vlm_backend)
         if export_crops:
             vlm.crops_dir = export_crops
+        else:
+            temp_crops_dir = tempfile.mkdtemp(prefix="pdf2md_vlm_")
+            vlm.crops_dir = temp_crops_dir
 
     parts = [f"# {os.path.splitext(os.path.basename(pdf_path))[0]}", ""]
     open_fence = None       # (tag, [lines]) of a fenced block awaiting continuation
@@ -664,7 +674,7 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
         all_boxes = []
         page_h = 0
         if not used_text_layer:
-            img, all_boxes, crop_paths = process_page_regions(page, dpi, lang, export_crops=export_crops)
+            img, all_boxes, crop_paths = process_page_regions(page, dpi, lang, export_crops=export_crops, temp_crops_dir=temp_crops_dir)
             page_h = img.size[1]
             cont, standalone = boxes_continuing(prev_page_state, all_boxes)
             if cont and open_fence is not None:
@@ -762,6 +772,11 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
         parts.append("")
 
     doc.close()
+
+    # Clean up temp crops directory if VLM was used without --export-crops
+    if temp_crops_dir and os.path.isdir(temp_crops_dir):
+        import shutil as sh
+        sh.rmtree(temp_crops_dir, ignore_errors=True)
 
     markdown = "\n".join(parts)
     with open(out_path, "w", encoding="utf-8") as f:
