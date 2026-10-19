@@ -76,12 +76,15 @@ def polish_markdown(markdown, backend, min_chars=20):
     n_fenced = sum(1 for k, _ in segments if k == "fence")
     _dbg(f"segments: {n_prose} prose, {n_fenced} fenced (fences never sent)")
     warned_unreachable = False
+    stats = {"polished": 0, "unchanged": 0, "drift": 0, "empty": 0,
+             "error": 0, "skipped": 0}
     for i, (kind, text) in enumerate(segments):
         if kind == "fence" or not text.strip():
             out.append(text)
             continue
         if len(text.strip()) < min_chars:
             _dbg(f"segment {i}: skipped ({len(text.strip())} chars < {min_chars})")
+            stats["skipped"] += 1
             out.append(text)
             continue
         try:
@@ -95,6 +98,7 @@ def polish_markdown(markdown, backend, min_chars=20):
                 )
                 warned_unreachable = True
             _dbg(f"segment {i}: backend error: {exc!r}")
+            stats["error"] += 1
             polished = ""
         polished = polished.strip()
         original_lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -102,18 +106,30 @@ def polish_markdown(markdown, backend, min_chars=20):
         # Fail-closed: reject empty or structurally drifted responses
         if not polished:
             _dbg(f"segment {i}: empty response -> kept original")
+            stats["empty"] += 1
             out.append(text)
             continue
         if len(new_lines) != len(original_lines):
             _dbg(f"segment {i}: line drift "
                  f"({len(original_lines)} -> {len(new_lines)} lines) -> kept original")
+            stats["drift"] += 1
             out.append(text)
             continue
         if polished == text.strip():
             _dbg(f"segment {i}: unchanged response")
+            stats["unchanged"] += 1
         else:
             _dbg(f"segment {i}: polished OK")
+            stats["polished"] += 1
         out.append(polished + ("\n" if text.endswith("\n") else ""))
+    print(
+        "[pdf2md:polish] prose segments: "
+        f"{stats['polished']} polished, {stats['unchanged']} unchanged, "
+        f"{stats['drift']} rejected (line drift), {stats['empty']} empty, "
+        f"{stats['error']} errors, {stats['skipped']} skipped; "
+        f"{n_fenced} fenced blocks untouched.",
+        file=sys.stderr,
+    )
     return "".join(out)
 
 
