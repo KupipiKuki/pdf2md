@@ -1107,7 +1107,8 @@ Two follow-ups emerged from comparing the deterministic output against
 - **Single-GPU pause:** when both `--vlm` and `--polish` are given, the
   pipeline pauses after the VLM stage and prompts the user to load the
   polish model before continuing (`Ctrl+C` at the prompt skips polishing;
-  `--no-pause` disables the wait for non-interactive runs).
+  `--no-pause` disables the wait for non-interactive runs; see Section 14.3
+  for same-backend optimization).
 - Backend reuse: resolve via `build_backend` (`gemini-*`, `openai:<model>@<url>`,
   `granite` -> no-op, `dryrun` -> no-op). Granite is always a no-op here: it is
   a document-conversion model, not an instruction-following LLM (Section 11.2
@@ -1186,3 +1187,72 @@ Two follow-ups emerged from comparing the deterministic output against
    `python scripts/pdf2md.py electricalDiagramOCR.pdf -o out.md --vlm <backend> --polish`
    and confirm the QAQC Section 10.2 residuals (`| think`, `re", "r1"4,`)
    are repaired and the benchmark gate (>= 0.590) still passes.
+
+---
+
+## 14. Spec: LLM Unreachability Warnings, Text-Only Polish Adapter, and Single-GPU Pause Ergonomics (for the coder)
+
+Follow-up improvements identified during architecture review and user feedback on the two-stage LLM pipeline (Sections 11 and 13):
+
+### 14.1 Visible one-time warning on LLM unreachability
+
+**Problem:** By default, when `OpenAICompatBackend` or `polish_markdown` encounters a connection failure, timeout, or HTTP error, it catches the exception and quietly falls closed (returning `""` or original prose). Diagnostic logs (`_dbg`) are only visible when `PDF2MD_DEBUG=1` is set. Consequently, users running `--vlm openai:...` or `--polish openai:...` with a local server offline or misconfigured receive no visible feedback on `stderr` indicating that the LLM stage was unreachable and skipped.
+
+**Specification:**
+- In `docling_engineering/vlm.py` (`OpenAICompatBackend`):
+  - Add an instance flag `self._unreachable_warned = False`.
+  - When an exception occurs during the HTTP request or response parsing:
+    - If `not self._unreachable_warned`, emit a visible warning to `sys.stderr`:
+      ```
+      [docling-engineering] OpenAI-compatible backend ({self.base_url}) unreachable or call failed: {exc}; falling back to deterministic OCR.
+      ```
+    - Set `self._unreachable_warned = True` so subsequent figure crops do not flood `stderr`.
+    - Continue to fail closed (return `""`).
+- In `docling_engineering/polish.py` (`polish_markdown`):
+  - Add a one-time warning to `sys.stderr` when backend exceptions occur in the prose loop:
+    ```
+    [pdf2md:polish] Polish backend unreachable or failed ({exc}); prose kept unpolished.
+    ```
+  - Continue to fail closed (keep original prose segment without crashing).
+
+### 14.2 Native text-only polish adapter for pure-text local LLMs
+
+**Problem:** In `docling_engineering/polish.py`, `_TextAdapter` currently generates a temporary 1x1 transparent PNG file on disk for each prose segment and calls `backend.complete(tmp, ...)`. In `OpenAICompatBackend`, this wraps the payload as a multimodal `image_url` message. If the user swaps on their local server to a dedicated *pure-text* model for the polish pass (e.g. `Llama-3.1-8B-Instruct`, `Mistral-7B`, `Qwen2.5-7B`), local inference engines (vLLM, llama-server, Ollama) will reject `image_url` payloads with HTTP 400 (`Image features not supported for this model`). In addition, writing and unlinking a temporary PNG per segment causes redundant disk I/O.
+
+**Specification:**
+- In `docling_engineering/vlm.py`:
+  - Extend `OpenAICompatBackend` with a `complete_text(prompt)` method (or support `image_path=None` in `complete`):
+    - Payload sends a standard text content block: `{"role": "user", "content": prompt}` without any `image_url` part.
+  - Extend `GeminiBackend` with a `complete_text(prompt)` method that calls `client.models.generate_content(contents=[prompt])` without synthetic image bytes.
+- In `docling_engineering/polish.py` (`build_polish_backend`):
+  - `_TextAdapter.complete_text(text)` should directly invoke `backend.complete_text(...)` when available, eliminating temporary disk files entirely.
+  - Fall back to the 1x1 PNG only if a backend uniquely requires an image path.
+
+### 14.3 Smart pause condition when backends match (`vlm_backend != polish_backend`)
+
+**Problem:** In `scripts/pdf2md.py`, `pause_for_polish` triggers whenever `vlm_backend is not None` and `pause_for_polish` is enabled, printing:
+`[pdf2md] The polish stage uses a different backend ({polish_backend}). Load the polish model now...`
+even if `vlm_backend == polish_backend` (e.g. using `gemini-2.5-flash` for both passes, or using the same multimodal local model `openai:Qwen3-VL-8B-Instruct` for both).
+
+**Specification:**
+- In `scripts/pdf2md.py`:
+  - Change the pause guard to:
+    ```python
+    elif pause_for_polish and vlm_backend is not None and vlm_backend != polish_backend:
+    ```
+  - If both stages share the exact same model backend, the model is already loaded in VRAM; skipping the pause avoids unnecessary user friction without requiring `--no-pause`.
+
+### 14.4 Unit test hygiene: clean up ResourceWarnings
+
+**Problem:** In `tests/test_heuristics.py::TestModelSweep`, lines 1130 and 1151 read files using bare `open(...).read()`, causing Python 3.14 to emit `ResourceWarning: unclosed file`.
+
+**Specification:**
+- Replace bare `open(...)` calls in `TestModelSweep` with `with open(...) as f:` context managers.
+
+### 14.5 Tests and acceptance
+
+1. Unit: `OpenAICompatBackend` emits a warning to `sys.stderr` exactly once when `urllib.request.urlopen` raises `URLError`.
+2. Unit: `OpenAICompatBackend.complete_text` sends `content` as pure string without any `image_url` entry in the JSON payload.
+3. Unit: `pdf2md` with `--vlm M --polish M` does NOT prompt to pause; with `--vlm A --polish B` it DOES prompt.
+4. Unit: All 102 tests pass with 0 `ResourceWarning` notices.
+
