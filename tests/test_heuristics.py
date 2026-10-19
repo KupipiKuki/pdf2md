@@ -985,6 +985,40 @@ class TestTreeDiagramRendering(unittest.TestCase):
         self.assertTrue(is_diag)
         self.assertEqual(block, "```mermaid\n" + multiparent + "\n```")
 
+
+    def test_process_flow_stays_mermaid_not_tree(self):
+        from docling_engineering.heuristics import parse_ascii_diagram_block
+        # Proposed Pipeline: vertical arrows are flow markers, not branches.
+        # Topologically a tree, semantically a flow -> must stay mermaid.
+        pipeline = ["PDF", "|", "v", "Docling", "|", "v", "Normal text",
+                    "|", "v", "Standard Docling extraction", "|", "v",
+                    "Figure detector", "|", "v", "Photograph"]
+        is_diag, block = parse_ascii_diagram_block(pipeline)
+        self.assertTrue(is_diag)
+        self.assertTrue(block.startswith("```mermaid\n"))
+
+    def test_linear_chain_stays_mermaid_not_tree(self):
+        from docling_engineering.heuristics import parse_ascii_diagram_block
+        # Positive sequence network G-T1-LINE-T2-M: a chain is topologically
+        # a tree but semantically a sequence -> must stay mermaid.
+        is_diag, block = parse_ascii_diagram_block(["G | T1 | LINE | T2 | M"])
+        self.assertTrue(is_diag)
+        self.assertTrue(block.startswith("```mermaid\n"))
+        is_diag, block = parse_ascii_diagram_block(
+            ["Xs(G)", "+", "XT1", "+", "XLINE", "+", "XT2", "+", "Xs(M)"])
+        self.assertTrue(is_diag)
+        self.assertTrue(block.startswith("```mermaid\n"))
+
+    def test_has_branching_children(self):
+        from docling_engineering.heuristics import has_branching_children
+        branched = [("A", "A"), ("B", "B"), ("C", "C")]
+        edges_b = [("A", "B"), ("A", "C")]
+        self.assertTrue(has_branching_children(branched, edges_b))
+        chain = [("A", "A"), ("B", "B"), ("C", "C")]
+        edges_c = [("A", "B"), ("B", "C")]
+        self.assertFalse(has_branching_children(chain, edges_c))
+
+
     def test_postprocess_tree_view(self):
         from docling_engineering.vlm import postprocess_tree_view
         tree = "root\n\u251c\u2500\u2500 a\n\u2514\u2500\u2500 b"

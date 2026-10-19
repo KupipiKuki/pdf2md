@@ -330,7 +330,9 @@ def is_tree(nodes, edges):
     """True when the graph is a strict rooted tree: at least 2 nodes, exactly
     one root (in-degree 0), every other node in-degree 1, and connected
     (edge count == node count - 1 implies connectedness given the degree
-    constraints)."""
+    constraints). Note: a linear chain also satisfies this; callers that
+    need a *hierarchy* should additionally require branching via
+    has_branching_children (Section 13.2)."""
     node_ids = [nid for nid, _ in nodes]
     if len(node_ids) < 2 or not edges:
         return False
@@ -347,6 +349,41 @@ def is_tree(nodes, edges):
     if any(deg != 1 for nid, deg in in_degree.items() if nid != roots[0]):
         return False
     return len(edges) == len(node_ids) - 1
+
+
+def has_branching_children(nodes, edges):
+    """True when at least one node has 2+ children: the graph is a genuine
+    hierarchy rather than a linear chain (which is topologically a tree
+    but semantically a sequence)."""
+    child_counts = {}
+    for src, dst in edges:
+        child_counts[src] = child_counts.get(src, 0) + 1
+    return any(count >= 2 for count in child_counts.values())
+
+
+def _counts_hierarchy_markers(lines):
+    """Count hierarchy-style markers (branch prefixes) vs flow-style
+    markers (standalone vertical arrows) in the OCR lines. A tree diagram
+    is drawn with branches; a process flow is drawn with arrows."""
+    if isinstance(lines, str):
+        lines = lines.splitlines()
+    arrow_pattern = re.compile(
+        r"^(\||\bv\b|\bV\b|Vv|\u25bc|\u2193|\^|--+>|==+>)+$", re.IGNORECASE)
+    tree_branch_prefix = re.compile(
+        r"^([|\[\]\(\)]*\s*(?:\|-|\+-|L[-_.]|r[-_.]|[\u251c\u2514\u2500-\u257f])\s*)(.*)$")
+    branches = 0
+    arrows = 0
+    for line in lines:
+        stripped = (line or "").strip()
+        if not stripped:
+            continue
+        if arrow_pattern.match(stripped):
+            arrows += 1
+        elif tree_branch_prefix.match(stripped) or stripped.startswith("| ") \
+                or stripped.startswith("|-") or stripped.startswith("L-") \
+                or stripped.startswith("L_"):
+            branches += 1
+    return branches, arrows
 
 
 def render_tree_view(nodes, edges):
@@ -377,14 +414,30 @@ def parse_ascii_diagram_block(lines):
     """Parse an ASCII diagram and render it in the best-fit form.
 
     Returns (is_diagram: bool, fenced_block: str) where fenced_block is a
-    complete fenced Markdown block: ```treeView-beta ... ``` for strict
-    trees (Section 13.2) or ```mermaid ... ``` otherwise.
+    complete fenced Markdown block: ```treeView-beta ... ``` for genuine
+    hierarchies (Section 13.2) or ```mermaid ... ``` otherwise.
+
+    A diagram is rendered as a tree only when ALL hold:
+    1. the graph is a strict rooted tree (is_tree),
+    2. it actually branches (has_branching_children) - a linear chain is
+       topologically a tree but semantically a sequence (e.g. the
+       positive-sequence network G-T1-LINE-T2-M),
+    3. the source OCR lines use hierarchy markers (branch prefixes),
+       not flow markers (standalone vertical arrows) - a process flow
+       drawn with arrows is a tree topologically but a flow semantically
+       (e.g. the Proposed Pipeline).
     """
+    if isinstance(lines, str):
+        lines = lines.splitlines()
     is_diag, mermaid_code = parse_ascii_diagram_to_mermaid(lines)
     if not is_diag:
         return False, ""
     nodes, edges = _parse_mermaid_graph(mermaid_code)
-    if is_tree(nodes, edges):
+    branches, arrows = _counts_hierarchy_markers(lines)
+    if (is_tree(nodes, edges)
+            and has_branching_children(nodes, edges)
+            and branches > 0
+            and arrows == 0):
         return True, "```treeView-beta\n" + render_tree_view(nodes, edges) + "\n```"
     return True, "```mermaid\n" + mermaid_code + "\n```"
 
