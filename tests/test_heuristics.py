@@ -1064,5 +1064,87 @@ class TestPolishPass(unittest.TestCase):
         self.assertTrue(hasattr(adapter, "complete_text"))
 
 
+
+
+class TestModelSweep(unittest.TestCase):
+    """Section 11.5 helper: interactive one-model-at-a-time sweep."""
+
+    def test_model_slug(self):
+        from scripts.model_sweep import model_slug
+        self.assertEqual(model_slug("openai:Qwen3-VL-8B-Instruct@http://localhost:8000/v1"),
+                         "Qwen3-VL-8B-Instruct")
+        self.assertEqual(model_slug("openai:qwen2.5-vl:7b@http://localhost:11434/v1"),
+                         "qwen2.5-vl_7b")
+        self.assertEqual(model_slug("local:Llama-3.2-11B-Vision"), "Llama-3.2-11B-Vision")
+
+    def test_sweep_records_ratio_and_ranks(self):
+        import tempfile
+        import shutil
+        from unittest.mock import patch, MagicMock
+        import scripts.model_sweep as sweep
+
+        tmp = tempfile.mkdtemp()
+        fake_pdf = os.path.join(tmp, "doc.pdf")
+        open(fake_pdf, "w").close()
+
+        def fake_run_pipeline(pdf, out_path, spec):
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("converted by " + spec + "\n")
+            return 0
+
+        def fake_benchmark(out_path, ref):
+            text = open(out_path, encoding="utf-8").read()
+            ratio = 0.9 if "good" in text else 0.5
+            return ratio, f"Line similarity (SequenceMatcher): {ratio}"
+
+        out_dir = os.path.join(tmp, "sweep")
+        argv = ["model_sweep.py", fake_pdf, "--models",
+                "openai:good-model@http://localhost:8000/v1",
+                "openai:bad-model@http://localhost:8000/v1",
+                "--ref", os.path.join(tmp, "ref.md"),
+                "--out-dir", out_dir]
+        try:
+            with patch.object(sweep, "run_pipeline", side_effect=fake_run_pipeline), \
+                 patch.object(sweep, "run_benchmark", side_effect=fake_benchmark), \
+                 patch("builtins.input", return_value=""):
+                with patch.object(sys, "argv", argv):
+                    rc = sweep.main()
+            self.assertEqual(rc, 0)
+            good = os.path.join(out_dir, "good-model.md")
+            bad = os.path.join(out_dir, "bad-model.md")
+            self.assertTrue(os.path.isfile(good))
+            self.assertTrue(os.path.isfile(bad))
+            self.assertEqual(open(os.path.join(out_dir, "good-model.ratio.txt")).read().strip(), "0.9")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_cached_results_skipped(self):
+        import tempfile
+        import shutil
+        from unittest.mock import patch
+        import scripts.model_sweep as sweep
+
+        tmp = tempfile.mkdtemp()
+        fake_pdf = os.path.join(tmp, "doc.pdf")
+        open(fake_pdf, "w").close()
+        out_dir = os.path.join(tmp, "sweep")
+        os.makedirs(out_dir)
+        with open(os.path.join(out_dir, "cached-model.ratio.txt"), "w") as f:
+            f.write("0.75\n")
+
+        argv = ["model_sweep.py", fake_pdf, "--models", "openai:cached-model@http://x/v1",
+                "--ref", os.path.join(tmp, "ref.md"), "--out-dir", out_dir]
+        try:
+            with patch.object(sweep, "run_pipeline") as mock_run, \
+                 patch("builtins.input", return_value=""):
+                with patch.object(sys, "argv", argv):
+                    rc = sweep.main()
+            self.assertEqual(rc, 0)
+            # Cached: pipeline never invoked, no interactive prompt consumed
+            mock_run.assert_not_called()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1065,6 +1065,8 @@ doc = converter.convert(crop_png_path).document
 
 Model-quality expectations: Granite-Docling is expected to help only code listings; Mermaid/SLD quality still depends on a general VLM (Gemini now; a local Qwen-VL class model later via `openai:` backend). Choose the local model by running the 16 exported crops through each candidate and scoring against `ref_output.md`.
 
+**Tooling added:** `scripts/model_sweep.py` runs the full pipeline + benchmark per candidate model and prints a best-first ranking. Because only one local LLM can be loaded at a time (single GPU), it pauses after each run and prompts the user to load the next model before continuing. Results are cached per model (`scratch/sweep/<model>.ratio.txt`), so an interrupted sweep can be resumed without re-running earlier models (`--force` re-runs all). Unit-tested in `tests/test_heuristics.py::TestModelSweep` (mocked subprocess; no GPU or network needed).
+
 ---
 
 ## 12. Architectural Justification: Docling Native vs. Docling + Multimodal VLM

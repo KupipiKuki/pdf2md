@@ -46,6 +46,23 @@ Docling
 
 Multi-parent diagrams (fan-in/fan-out graphs) keep the `flowchart` rendering.
 
+### Sweeping candidate local models (one at a time)
+
+Only one local LLM can be loaded at a time on a single GPU. `scripts/model_sweep.py`
+runs the full pipeline + benchmark once per candidate model, pausing between runs so
+you can load the next model:
+
+```bash
+python scripts/model_sweep.py electricalDiagramOCR.pdf \
+    --models openai:Qwen3-VL-8B-Instruct@http://localhost:8000/v1 \
+             openai:Llama-3.2-11B-Vision@http://127.0.0.1:8080/v1 \
+             openai:qwen2.5-vl:7b@http://localhost:11434/v1
+```
+
+Each run writes `scratch/sweep/<model>.md` plus a cached `<model>.ratio.txt`;
+re-running skips models that already have results (`--force` to redo). The final
+table ranks all models by similarity against `ref_output.md`.
+
 If the `tesseract` binary is not on your `PATH`, point to it with the
 `TESSERACT_CMD` environment variable.
 
