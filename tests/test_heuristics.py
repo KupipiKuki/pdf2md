@@ -1146,5 +1146,52 @@ class TestModelSweep(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+
+
+class TestPolishPause(unittest.TestCase):
+    """Single-GPU workflow: pause between --vlm and --polish stages."""
+
+    def test_pause_prompt_shown_between_stages(self):
+        import tempfile
+        import shutil
+        from unittest.mock import patch, MagicMock
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+        import importlib
+        pdf2md = importlib.import_module("pdf2md")
+        import io as _io
+
+        tmp = tempfile.mkdtemp()
+        out_path = os.path.join(tmp, "out.md")
+        try:
+            with patch.object(pdf2md.os.path, "isfile", return_value=True), \
+                 patch.object(pdf2md, "configure_tesseract"), \
+                 patch.object(pdf2md, "convert") as mock_convert, \
+                 patch.object(sys, "argv", ["pdf2md.py", "fake.pdf", "-o", out_path,
+                                            "--vlm", "openai:vlm-model@http://x/v1",
+                                            "--polish", "openai:polish-model@http://x/v1"]):
+                pdf2md.main()
+            kwargs = mock_convert.call_args.kwargs
+            self.assertTrue(kwargs["pause_for_polish"])
+            self.assertEqual(kwargs["vlm_backend"], "openai:vlm-model@http://x/v1")
+            self.assertEqual(kwargs["polish_backend"], "openai:polish-model@http://x/v1")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_no_pause_flag_disables_it(self):
+        from unittest.mock import patch
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+        import importlib
+        pdf2md = importlib.import_module("pdf2md")
+        with patch.object(pdf2md.os.path, "isfile", return_value=True), \
+             patch.object(pdf2md, "configure_tesseract"), \
+             patch.object(pdf2md, "convert") as mock_convert, \
+             patch.object(sys, "argv", ["pdf2md.py", "fake.pdf",
+                                        "--vlm", "openai:a@http://x/v1",
+                                        "--polish", "openai:b@http://x/v1",
+                                        "--no-pause"]):
+            pdf2md.main()
+        self.assertFalse(mock_convert.call_args.kwargs["pause_for_polish"])
+
+
 if __name__ == "__main__":
     unittest.main()

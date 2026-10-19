@@ -636,7 +636,7 @@ def merge_regions(prose_lines, box_results, dpi, lang, use_mermaid=True, box_ove
 
 
 def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_mermaid=True,
-            export_crops=None, vlm_backend=None, polish_backend=None):
+            export_crops=None, vlm_backend=None, polish_backend=None, pause_for_polish=False):
     if not os.path.isfile(pdf_path):
         sys.exit(f"File not found: {pdf_path}")
     try:
@@ -784,6 +784,21 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
         from docling_engineering.polish import build_polish_backend, polish_markdown
         adapter = build_polish_backend(polish_backend)
         if adapter is None:
+            pass
+        elif pause_for_polish and vlm_backend is not None:
+            print(
+                f"[pdf2md] VLM stage done (backend: {vlm_backend}).\n"
+                f"[pdf2md] The polish stage uses a different backend ({polish_backend}).\n"
+                "[pdf2md] Load the polish model now, then press Enter to continue "
+                "(Ctrl+C to skip polishing)...",
+                file=sys.stderr,
+            )
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                print("[pdf2md] polish skipped by user.", file=sys.stderr)
+                adapter = None
+        if adapter is None:
             print("[pdf2md] --polish: backend is a no-op for text repair; skipping.",
                   file=sys.stderr)
         else:
@@ -849,6 +864,14 @@ def main():
              "Omitted: no VLM (deterministic OCR). Plain '--vlm': auto-detect backend.",
     )
     ap.add_argument(
+        "--no-pause",
+        action="store_true",
+        help="Do not pause between the --vlm and --polish stages. By default, "
+             "when both --vlm and --polish are given, pdf2md waits for Enter "
+             "after the VLM stage so the polish model can be loaded (single-GPU "
+             "constraint: only one local LLM at a time).",
+    )
+    ap.add_argument(
         "--polish",
         metavar="BACKEND",
         default=None,
@@ -863,7 +886,8 @@ def main():
     out = args.output or os.path.splitext(args.pdf)[0] + ".md"
     convert(args.pdf, out, args.lang, args.dpi, args.prefer_text_layer, args.save_images,
             use_mermaid=not args.no_mermaid, export_crops=args.export_crops,
-            vlm_backend=args.vlm, polish_backend=getattr(args, "polish", None))
+            vlm_backend=args.vlm, polish_backend=getattr(args, "polish", None),
+            pause_for_polish=not args.no_pause)
 
 
 if __name__ == "__main__":

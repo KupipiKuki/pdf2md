@@ -1104,6 +1104,10 @@ Two follow-ups emerged from comparing the deterministic output against
   stage that runs *after* deterministic rendering and VLM enrichment, before the
   final Markdown assembly. It never sees crop images; it repairs text.
 - CLI: `--polish` (off by default; opt-in flag on `scripts/pdf2md.py`).
+- **Single-GPU pause:** when both `--vlm` and `--polish` are given, the
+  pipeline pauses after the VLM stage and prompts the user to load the
+  polish model before continuing (`Ctrl+C` at the prompt skips polishing;
+  `--no-pause` disables the wait for non-interactive runs).
 - Backend reuse: resolve via `build_backend` (`gemini-*`, `openai:<model>@<url>`,
   `granite` -> no-op, `dryrun` -> no-op). Granite is always a no-op here: it is
   a document-conversion model, not an instruction-following LLM (Section 11.2
