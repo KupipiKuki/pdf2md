@@ -75,6 +75,7 @@ def polish_markdown(markdown, backend, min_chars=20):
     n_prose = sum(1 for k, _ in segments if k == "prose")
     n_fenced = sum(1 for k, _ in segments if k == "fence")
     _dbg(f"segments: {n_prose} prose, {n_fenced} fenced (fences never sent)")
+    warned_unreachable = False
     for i, (kind, text) in enumerate(segments):
         if kind == "fence" or not text.strip():
             out.append(text)
@@ -86,6 +87,13 @@ def polish_markdown(markdown, backend, min_chars=20):
         try:
             polished = backend.complete_text(text) or ""
         except Exception as exc:
+            if not warned_unreachable:
+                print(
+                    f"[pdf2md:polish] Polish backend unreachable or failed ({exc}); "
+                    "prose kept unpolished.",
+                    file=sys.stderr,
+                )
+                warned_unreachable = True
             _dbg(f"segment {i}: backend error: {exc!r}")
             polished = ""
         polished = polished.strip()
@@ -120,13 +128,17 @@ def build_polish_backend(backend_spec):
     if isinstance(backend, (GraniteDoclingBackend, DryRunBackend)) or backend is None:
         return None
 
+    has_native_text = hasattr(backend, "complete_text")
+
     class _TextAdapter:
         def complete_text(self, text):
-            # Reuse the vision contract with a 1x1 transparent PNG:
-            # backends send the prompt text; the image is ignored by
-            # text-capable chat models through the OpenAI-compat path.
+            prompt = POLISH_PROMPT + "\n\nTEXT:\n" + text
+            if has_native_text:
+                # Native text-only path: no image part, no temp file (Section 14.2)
+                return backend.complete_text(prompt)
+            # Legacy fallback for backends that only implement the vision
+            # contract: reuse it with a 1x1 transparent PNG.
             import base64
-            import os
             import tempfile
             png = base64.b64decode(
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
@@ -135,7 +147,7 @@ def build_polish_backend(backend_spec):
                 f.write(png)
                 tmp = f.name
             try:
-                return backend.complete(tmp, POLISH_PROMPT + "\n\nTEXT:\n" + text)
+                return backend.complete(tmp, prompt)
             finally:
                 os.unlink(tmp)
 

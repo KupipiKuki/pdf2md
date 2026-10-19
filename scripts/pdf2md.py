@@ -785,7 +785,8 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
         adapter = build_polish_backend(polish_backend)
         if adapter is None:
             pass
-        elif pause_for_polish and vlm_backend is not None:
+        elif (pause_for_polish and vlm_backend is not None
+              and vlm_backend != polish_backend):
             print(
                 f"[pdf2md] VLM stage done (backend: {vlm_backend}).\n"
                 f"[pdf2md] The polish stage uses a different backend ({polish_backend}).\n"

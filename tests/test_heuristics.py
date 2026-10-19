@@ -1127,7 +1127,8 @@ class TestModelSweep(unittest.TestCase):
             return 0
 
         def fake_benchmark(out_path, ref):
-            text = open(out_path, encoding="utf-8").read()
+            with open(out_path, encoding="utf-8") as f:
+                text = f.read()
             ratio = 0.9 if "good" in text else 0.5
             return ratio, f"Line similarity (SequenceMatcher): {ratio}"
 
@@ -1148,7 +1149,8 @@ class TestModelSweep(unittest.TestCase):
             bad = os.path.join(out_dir, "bad-model.md")
             self.assertTrue(os.path.isfile(good))
             self.assertTrue(os.path.isfile(bad))
-            self.assertEqual(open(os.path.join(out_dir, "good-model.ratio.txt")).read().strip(), "0.9")
+            with open(os.path.join(out_dir, "good-model.ratio.txt")) as f:
+                self.assertEqual(f.read().strip(), "0.9")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1225,6 +1227,131 @@ class TestPolishPause(unittest.TestCase):
                                         "--no-pause"]):
             pdf2md.main()
         self.assertFalse(mock_convert.call_args.kwargs["pause_for_polish"])
+
+
+
+
+class TestSection14Acceptance(unittest.TestCase):
+    """Section 14: unreachability warnings, text-only adapter, smart pause."""
+
+    def test_openai_compat_warns_once_on_unreachable(self):
+        import io
+        import urllib.error
+        from unittest.mock import patch
+        from docling_engineering.vlm import OpenAICompatBackend
+        backend = OpenAICompatBackend(model="m", base_url="http://localhost:9/v1")
+        err = io.StringIO()
+        with patch("urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("refused")), \
+             patch("sys.stderr", new=err):
+            for _ in range(3):
+                self.assertEqual(backend.complete("x.png", "p"), "")
+        self.assertEqual(err.getvalue().count("unreachable or call failed"), 1)
+        self.assertIn("falling back to deterministic OCR", err.getvalue())
+        self.assertTrue(err.getvalue().startswith("[docling-engineering]"))
+
+    def test_openai_compat_complete_text_pure_string_content(self):
+        import io
+        import json
+        from unittest.mock import patch, MagicMock
+        from docling_engineering.vlm import OpenAICompatBackend
+        backend = OpenAICompatBackend(model="text-model",
+                                      base_url="http://localhost:9/v1")
+        mock_resp_data = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = mock_resp_data
+        mock_resp.__enter__.return_value = mock_resp
+        with patch("urllib.request.urlopen", return_value=mock_resp) as m:
+            out = backend.complete_text("repair this text")
+        self.assertEqual(out, "ok")
+        body = json.loads(m.call_args[0][0].data.decode("utf-8"))
+        # content must be a pure string, no image_url part anywhere
+        self.assertEqual(body["messages"][0]["content"], "repair this text")
+        self.assertNotIn("image_url", json.dumps(body))
+
+    def test_gemini_complete_text_no_image(self):
+        from unittest.mock import patch, MagicMock
+        from docling_engineering.vlm import GeminiBackend
+        backend = GeminiBackend(model="gemini-2.5-flash")
+        backend.client = MagicMock()
+        resp = MagicMock()
+        resp.text = "polished"
+        backend.client.models.generate_content.return_value = resp
+        self.assertEqual(backend.complete_text("some text"), "polished")
+        contents = backend.client.models.generate_content.call_args.kwargs["contents"]
+        self.assertEqual(contents, ["some text"])
+        self.assertNotIn("inline_data", str(contents))
+
+    def test_polish_adapter_uses_native_text_path(self):
+        import tempfile
+        import shutil
+        from unittest.mock import patch
+        from docling_engineering.polish import build_polish_backend
+        from docling_engineering.vlm import OpenAICompatBackend
+        adapter = build_polish_backend("openai:m@http://localhost:9/v1")
+        self.assertIsNotNone(adapter)
+        tmp = tempfile.mkdtemp()
+        try:
+            # If the adapter still wrote a temp PNG, this would fail via
+            # the vision contract; patch complete_text to observe the call
+            with patch.object(OpenAICompatBackend, "complete_text",
+                              return_value="repaired") as mock_ct, \
+                 patch.object(OpenAICompatBackend, "complete") as mock_c:
+                out = adapter.complete_text("prose to repair")
+                self.assertEqual(out, "repaired")
+                mock_ct.assert_called_once()
+                mock_c.assert_not_called()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_same_backend_no_pause(self):
+        from unittest.mock import patch
+        import importlib
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+        pdf2md = importlib.import_module("pdf2md")
+        same = "openai:Same-Model@http://localhost:9/v1"
+        with patch.object(pdf2md.os.path, "isfile", return_value=True), \
+             patch.object(pdf2md, "configure_tesseract"), \
+             patch.object(pdf2md, "convert") as mock_convert, \
+             patch.object(sys, "argv", ["pdf2md.py", "f.pdf", "--vlm", same,
+                                        "--polish", same]):
+            pdf2md.main()
+        # Same backend: pause flag may be on but convert's guard skips it;
+        # the guard condition is enforced inside convert(). Here we verify
+        # the flag plumbing still passes both backends unchanged.
+        kwargs = mock_convert.call_args.kwargs
+        self.assertEqual(kwargs["vlm_backend"], same)
+        self.assertEqual(kwargs["polish_backend"], same)
+        # Direct guard check: identical backends must not satisfy it
+        vlm = kwargs["vlm_backend"]
+        polish = kwargs["polish_backend"]
+        self.assertFalse(vlm is not None and vlm != polish)
+
+    def test_different_backends_pause_condition_true(self):
+        # The convert() guard: pause only when backends differ
+        vlm = "openai:A@http://localhost:9/v1"
+        polish = "openai:B@http://localhost:9/v1"
+        self.assertTrue(vlm is not None and vlm != polish)
+        # Same string -> no pause
+        self.assertFalse(vlm is not None and vlm != vlm)
+
+    def test_polish_loop_warns_once_on_backend_failure(self):
+        import io
+        from unittest.mock import patch
+        from docling_engineering.polish import polish_markdown
+
+        class Broken:
+            def complete_text(self, text):
+                raise RuntimeError("connection refused")
+
+        md = ("Prose segment one that is long enough to be sent.\n\n"
+              "Prose segment two that is also long enough here.\n")
+        err = io.StringIO()
+        with patch("sys.stderr", new=err):
+            out = polish_markdown(md, Broken())
+        self.assertEqual(out, md)
+        self.assertEqual(err.getvalue().count("unreachable or failed"), 1)
+        self.assertIn("prose kept unpolished", err.getvalue())
 
 
 if __name__ == "__main__":

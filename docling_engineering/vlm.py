@@ -54,6 +54,7 @@ class OpenAICompatBackend:
         self.model = model or "Qwen3-VL-8B-Instruct"
         self.base_url = (base_url or "http://localhost:8000/v1").rstrip("/")
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "not-needed")
+        self._unreachable_warned = False
 
     def complete(self, image_path, prompt):
         try:
@@ -97,7 +98,56 @@ class OpenAICompatBackend:
                 return (content or "").strip()
         except Exception as exc:
             # Fall back to deterministic OCR rendering on connection error or timeout
+            if not self._unreachable_warned:
+                print(
+                    f"[docling-engineering] OpenAI-compatible backend ({self.base_url}) "
+                    f"unreachable or call failed: {exc}; falling back to deterministic OCR.",
+                    file=sys.stderr,
+                )
+                self._unreachable_warned = True
             _dbg(f"{type(self).__name__}.complete failed for {image_path!r}: {exc!r}")
+            return ""
+
+    def complete_text(self, prompt):
+        """Text-only chat completion: no image part in the payload, for
+        pure-text local models (Section 14.2). Fails closed like complete()."""
+        try:
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
+                "temperature": 0.0,
+                "max_tokens": 4096,
+            }
+            req_data = json.dumps(payload).encode("utf-8")
+            url = f"{self.base_url}/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            }
+            req = urllib.request.Request(url, data=req_data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=self.TIMEOUT_SECONDS) as resp:
+                res_json = json.loads(resp.read().decode("utf-8"))
+                choice = res_json.get("choices", [{}])[0]
+                message = choice.get("message", {})
+                content = message.get("content", "")
+                if isinstance(content, list):
+                    text_parts = [p.get("text", "") for p in content if isinstance(p, dict)]
+                    return "".join(text_parts).strip()
+                return (content or "").strip()
+        except Exception as exc:
+            if not self._unreachable_warned:
+                print(
+                    f"[docling-engineering] OpenAI-compatible backend ({self.base_url}) "
+                    f"unreachable or call failed: {exc}; falling back to deterministic OCR.",
+                    file=sys.stderr,
+                )
+                self._unreachable_warned = True
+            _dbg(f"{type(self).__name__}.complete_text failed: {exc!r}")
             return ""
 
 
@@ -221,6 +271,22 @@ class GeminiBackend:
             return self._fallback_to_granite(image_path, prompt)
         except Exception:
             return self._fallback_to_granite(image_path, prompt)
+
+    def complete_text(self, prompt):
+        """Text-only generation without synthetic image bytes (Section 14.2).
+        Fails closed: returns "" on any error."""
+        if self.client is None:
+            return ""
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=[prompt],
+                config={"http_options": {"timeout": self.TIMEOUT_SECONDS * 1000}},
+            )
+            return response.text or ""
+        except Exception as exc:
+            _dbg(f"GeminiBackend.complete_text failed: {exc!r}")
+            return ""
 
 
 class DryRunBackend:
