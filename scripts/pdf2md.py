@@ -158,6 +158,7 @@ from docling_engineering.heuristics import (
     math_chain_to_mermaid,
     recover_numeric_misread,
     parse_ascii_diagram_to_mermaid,
+    parse_ascii_diagram_block,
     detect_gutters,
     group_into_paragraphs,
     strip_gutter_prefix,
@@ -231,9 +232,9 @@ def page_to_markdown(lines, force_biggest=None, use_mermaid=True):
     for block in blocks:
         if looks_like_ascii_art(block) and use_mermaid:
             raw_lines = [l["text"].strip() for l in block if l["text"].strip()]
-            is_diag, mermaid_code = parse_ascii_diagram_to_mermaid(raw_lines)
+            is_diag, diagram_block = parse_ascii_diagram_block(raw_lines)
             if is_diag:
-                out.append("```mermaid\n" + mermaid_code + "\n```")
+                out.append(diagram_block)
                 continue
 
         if looks_like_code(block, gutter_idx) or looks_like_ascii_art(block):
@@ -611,9 +612,9 @@ def merge_regions(prose_lines, box_results, dpi, lang, use_mermaid=True, box_ove
         if cleaned:
             # Check if box text is a diagram and should be converted to Mermaid
             if use_mermaid:
-                is_diag, mermaid_code = parse_ascii_diagram_to_mermaid(cleaned.splitlines())
+                is_diag, diagram_block = parse_ascii_diagram_block(cleaned.splitlines())
                 if is_diag:
-                    events.append((y0, 0, "box", "```mermaid\n" + mermaid_code + "\n```"))
+                    events.append((y0, 0, "box", diagram_block))
                     continue
             lang_tag = estimate_code_language(cleaned)
             fence = f"```{lang_tag}" if lang_tag else "```"
@@ -687,9 +688,9 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
                 # tagging.
                 fence = None
                 if use_mermaid and tag in ("", "mermaid"):
-                    is_diag, mermaid_code = parse_ascii_diagram_to_mermaid(merged.splitlines())
+                    is_diag, diagram_block = parse_ascii_diagram_block(merged.splitlines())
                     if is_diag:
-                        fence = "```mermaid\n" + mermaid_code + "\n```"
+                        fence = diagram_block
                 if fence is None:
                     new_tag = estimate_code_language(merged) or tag
                     fence = f"```{new_tag}\n{merged}\n```"

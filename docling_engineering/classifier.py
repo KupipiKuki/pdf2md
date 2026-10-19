@@ -10,11 +10,17 @@ image handling), so classify() distinguishes them by OCR emptiness /
 non-textual content and mode_for() maps them to a passthrough mode.
 """
 
-from .heuristics import clean_box_text, estimate_code_language, parse_ascii_diagram_to_mermaid
+from .heuristics import (
+    clean_box_text,
+    estimate_code_language,
+    parse_ascii_diagram_to_mermaid,
+    parse_ascii_diagram_block,
+)
 
 CATEGORIES = (
     "photograph",
     "plot_or_chart",
+    "tree_diagram",
     "flowchart_or_tree",
     "code_listing",
     "electrical_sld",
@@ -41,9 +47,11 @@ class FigureClassifier:
         lang = estimate_code_language(clean_box_text(text))
         if lang in ("json", "python", "yaml", "bash"):
             return "code_listing"
-        is_diag, _ = parse_ascii_diagram_to_mermaid(
+        is_diag, block = parse_ascii_diagram_block(
             clean_box_text(text).splitlines())
         if is_diag:
+            if block.startswith("```treeView-beta"):
+                return "tree_diagram"
             return "flowchart_or_tree"
         if any(k in t for k in self.PID_KEYWORDS):
             return "piping_and_instrumentation"
@@ -63,4 +71,6 @@ class FigureClassifier:
             return "C", "sld_topology"
         if category == "flowchart_or_tree":
             return "B", "diagram_to_mermaid"
+        if category == "tree_diagram":
+            return "B", "tree_to_treeview"
         return "A", "code_transcription"

@@ -35,8 +35,20 @@ Extract all electrical entities and connectivity into strict JSON matching this 
   ]
 }"""
 
+PROMPT_TREE_TO_TREEVIEW = """You are an expert technical diagram converter.
+Convert the hierarchical tree diagram in this image into a plain-text tree
+view using these rules:
+1. Root node on its own line at column 0.
+2. Children prefixed with box-drawing characters: "├── " for non-final
+   children, "└── " for the final child of a parent, and "│   " for
+   continuation of ancestor levels.
+3. Clean OCR noise in node labels.
+4. Output ONLY the tree-view text, with no code fence.
+"""
+
 MODE_PROMPTS = {
     "code_transcription": PROMPT_CODE_TRANSCRIPTION,
     "diagram_to_mermaid": PROMPT_DIAGRAM_TO_MERMAID,
+    "tree_to_treeview": PROMPT_TREE_TO_TREEVIEW,
     "sld_topology": PROMPT_SLD_TOPOLOGY,
 }

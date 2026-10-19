@@ -461,10 +461,17 @@ class TestFigureClassifier(unittest.TestCase):
         text = "1 class Generator:\n2 pass"
         self.assertEqual(self.clf.classify_text(text), "code_listing")
 
-    def test_tree_diagram_is_flowchart(self):
+    def test_tree_diagram_routed_to_tree_category(self):
         tree = ["Docling", "L_ EngineeringFigureExtension", "|- Electrical SLD", "|- P&ID"]
         text = "\n".join(tree)
-        self.assertEqual(self.clf.classify_text(text), "flowchart_or_tree")
+        # Section 13.2: strict trees get their own category + treeView rendering
+        self.assertEqual(self.clf.classify_text(text), "tree_diagram")
+        self.assertEqual(self.clf.mode_for("tree_diagram"), ("B", "tree_to_treeview"))
+
+    def test_multiparent_diagram_stays_flowchart(self):
+        diagram = ["PDF", "|", "v", "Docling", "|", "v", "Normal text", "Tables"]
+        text = "\n".join(diagram)
+        self.assertIn(self.clf.classify_text(text), ("flowchart_or_tree", "tree_diagram"))
 
     def test_empty_text_is_photograph(self):
         self.assertEqual(self.clf.classify_text(""), "photograph")
@@ -866,6 +873,128 @@ class TestVLMBackends(unittest.TestCase):
             with patch("docling_engineering.vlm.GraniteDoclingBackend._is_docling_vlm_available", return_value=False):
                 backend = build_backend("auto")
                 self.assertIsInstance(backend, DryRunBackend)
+
+
+
+class TestTreeDiagramRendering(unittest.TestCase):
+    """Section 13.2: tree detection and treeView-beta rendering."""
+
+    def _graph(self, mermaid):
+        from docling_engineering.heuristics import _parse_mermaid_graph
+        return _parse_mermaid_graph(mermaid)
+
+    def test_is_tree_chain(self):
+        from docling_engineering.heuristics import is_tree
+        g = """flowchart TD
+    A_1["A"]
+    B_2["B"]
+    C_3["C"]
+    A_1 --> B_2
+    B_2 --> C_3"""
+        nodes, edges = self._graph(g)
+        self.assertTrue(is_tree(nodes, edges))
+
+    def test_is_tree_star(self):
+        from docling_engineering.heuristics import is_tree
+        g = """flowchart TD
+    R_1["R"]
+    A_2["A"]
+    B_3["B"]
+    C_4["C"]
+    R_1 --> A_2
+    R_1 --> B_3
+    R_1 --> C_4"""
+        nodes, edges = self._graph(g)
+        self.assertTrue(is_tree(nodes, edges))
+
+    def test_not_tree_multi_parent(self):
+        from docling_engineering.heuristics import is_tree
+        g = """flowchart TD
+    A_1["A"]
+    B_2["B"]
+    C_3["C"]
+    A_1 --> C_3
+    B_2 --> C_3"""
+        nodes, edges = self._graph(g)
+        self.assertFalse(is_tree(nodes, edges))
+
+    def test_not_tree_cycle(self):
+        from docling_engineering.heuristics import is_tree
+        g = """flowchart TD
+    A_1["A"]
+    B_2["B"]
+    A_1 --> B_2
+    B_2 --> A_1"""
+        nodes, edges = self._graph(g)
+        self.assertFalse(is_tree(nodes, edges))
+
+    def test_not_tree_empty_or_single(self):
+        from docling_engineering.heuristics import is_tree
+        self.assertFalse(is_tree([], []))
+        self.assertFalse(is_tree([("A_1", "A")], []))
+
+    def test_render_tree_view_shape(self):
+        from docling_engineering.heuristics import render_tree_view
+        g = """flowchart TD
+    R_1["root"]
+    A_2["src"]
+    B_3["a.ts"]
+    C_4["b.ts"]
+    D_5["readme"]
+    R_1 --> A_2
+    R_1 --> D_5
+    A_2 --> B_3
+    A_2 --> C_4"""
+        nodes, edges = self._graph(g)
+        expected = (
+            "root\n"
+            "\u251c\u2500\u2500 src\n"
+            "\u2502   \u251c\u2500\u2500 a.ts\n"
+            "\u2502   \u2514\u2500\u2500 b.ts\n"
+            "\u2514\u2500\u2500 readme"
+        )
+        self.assertEqual(render_tree_view(nodes, edges), expected)
+
+    def test_parse_ascii_diagram_block_tree(self):
+        from docling_engineering.heuristics import parse_ascii_diagram_block
+        tree_lines = ["Docling", "L_ EngineeringFigureExtension",
+                      "|- Electrical SLD", "|- P&ID"]
+        is_diag, block = parse_ascii_diagram_block(tree_lines)
+        self.assertTrue(is_diag)
+        self.assertTrue(block.startswith("```treeView-beta\n"))
+        self.assertIn("Docling", block)
+        self.assertIn("EngineeringFigureExtension", block)
+        self.assertIn("\u251c\u2500\u2500", block)
+        self.assertTrue(block.endswith("\n```"))
+
+    def test_parse_ascii_diagram_block_flowchart_for_multiparent(self):
+        from unittest.mock import patch
+        from docling_engineering.heuristics import parse_ascii_diagram_block
+        # Fan-in graph (two parents -> one node) keeps the mermaid fence.
+        # The ASCII parser never emits fan-in (each label occurrence becomes
+        # a new node), so mock the mermaid layer to exercise the branch.
+        multiparent = '''flowchart TD
+    A_1["A"]
+    B_2["B"]
+    C_3["C"]
+    A_1 --> C_3
+    B_2 --> C_3'''
+        with patch("docling_engineering.heuristics.parse_ascii_diagram_to_mermaid",
+                  return_value=(True, multiparent)):
+            is_diag, block = parse_ascii_diagram_block(["anything"])
+        self.assertTrue(is_diag)
+        self.assertEqual(block, "```mermaid\n" + multiparent + "\n```")
+
+    def test_postprocess_tree_view(self):
+        from docling_engineering.vlm import postprocess_tree_view
+        tree = "root\n\u251c\u2500\u2500 a\n\u2514\u2500\u2500 b"
+        out = postprocess_tree_view(tree)
+        self.assertEqual(out, "```treeView-beta\n" + tree + "\n```")
+        # Pre-fenced response is unwrapped and re-fenced identically
+        self.assertEqual(postprocess_tree_view("```treeView-beta\n" + tree + "\n```"), out)
+        # No branch markers: rejected
+        self.assertIsNone(postprocess_tree_view("just text"))
+        self.assertIsNone(postprocess_tree_view(""))
 
 
 if __name__ == "__main__":

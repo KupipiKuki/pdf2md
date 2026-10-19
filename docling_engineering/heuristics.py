@@ -302,6 +302,93 @@ def parse_ascii_diagram_to_mermaid(lines):
     return True, "\n".join(out)
 
 
+TREE_NODE_RE = re.compile(r'^\s*(\w+)\[(?:"([^"]*)"|\'([^\']*)\'|\(([^)]*)\))\]\s*$')
+TREE_EDGE_RE = re.compile(r"^\s*(\w+)\s*(?:-->|---)\s*(\w+)\s*$")
+
+
+def _parse_mermaid_graph(mermaid_code):
+    """Extract (nodes, edges) as ((id, label), (src_id, dst_id)) lists from the
+    simple Mermaid subset emitted by parse_ascii_diagram_to_mermaid."""
+    nodes = []
+    edges = []
+    for line in mermaid_code.splitlines():
+        line = line.strip()
+        if line.startswith("flowchart") or not line:
+            continue
+        m = TREE_EDGE_RE.match(line)
+        if m:
+            edges.append((m.group(1), m.group(2)))
+            continue
+        m = TREE_NODE_RE.match(line)
+        if m:
+            label = next(g for g in m.groups()[1:] if g is not None)
+            nodes.append((m.group(1), label))
+    return nodes, edges
+
+
+def is_tree(nodes, edges):
+    """True when the graph is a strict rooted tree: at least 2 nodes, exactly
+    one root (in-degree 0), every other node in-degree 1, and connected
+    (edge count == node count - 1 implies connectedness given the degree
+    constraints)."""
+    node_ids = [nid for nid, _ in nodes]
+    if len(node_ids) < 2 or not edges:
+        return False
+    in_degree = {nid: 0 for nid in node_ids}
+    child_ids = set()
+    for src, dst in edges:
+        if dst not in in_degree or src not in in_degree:
+            return False
+        in_degree[dst] += 1
+        child_ids.add(dst)
+    roots = [nid for nid, deg in in_degree.items() if deg == 0]
+    if len(roots) != 1:
+        return False
+    if any(deg != 1 for nid, deg in in_degree.items() if nid != roots[0]):
+        return False
+    return len(edges) == len(node_ids) - 1
+
+
+def render_tree_view(nodes, edges):
+    """Render a parsed graph as an indented plain-text tree (the treeView
+    convention used by GitHub/GitLab Markdown). Root is the unique node
+    with in-degree 0; children keep their extraction order."""
+    children = {}
+    child_set = set()
+    for src, dst in edges:
+        children.setdefault(src, []).append(dst)
+        child_set.add(dst)
+    root = next(nid for nid, _ in nodes if nid not in child_set)
+    labels = dict(nodes)
+
+    def walk(nid, prefix, lines):
+        kids = children.get(nid, [])
+        for i, kid in enumerate(kids):
+            last = i == len(kids) - 1
+            lines.append(prefix + ("└── " if last else "├── ") + labels[kid])
+            walk(kid, prefix + ("    " if last else "│   "), lines)
+
+    lines = [labels[root]]
+    walk(root, "", lines)
+    return "\n".join(lines)
+
+
+def parse_ascii_diagram_block(lines):
+    """Parse an ASCII diagram and render it in the best-fit form.
+
+    Returns (is_diagram: bool, fenced_block: str) where fenced_block is a
+    complete fenced Markdown block: ```treeView-beta ... ``` for strict
+    trees (Section 13.2) or ```mermaid ... ``` otherwise.
+    """
+    is_diag, mermaid_code = parse_ascii_diagram_to_mermaid(lines)
+    if not is_diag:
+        return False, ""
+    nodes, edges = _parse_mermaid_graph(mermaid_code)
+    if is_tree(nodes, edges):
+        return True, "```treeView-beta\n" + render_tree_view(nodes, edges) + "\n```"
+    return True, "```mermaid\n" + mermaid_code + "\n```"
+
+
 # ---------------------------------------------------------------------------
 # Layout Heuristics
 # ---------------------------------------------------------------------------

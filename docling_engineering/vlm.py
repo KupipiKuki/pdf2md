@@ -317,6 +317,22 @@ def postprocess_mode_c(response):
     return "```json\n" + code + "\n```"
 
 
+def postprocess_tree_view(response):
+    """Validate and fence a tree-view response (Mode B, tree_to_treeview).
+    Accepts plain text or a pre-fenced treeView-beta block; requires at
+    least one branch marker line. Returns None when not usable."""
+    code = response.strip()
+    if code.startswith("```") and code.endswith("```"):
+        first_nl = code.find("\n")
+        last_fence = code.rfind("```")
+        if first_nl != -1 and last_fence > first_nl:
+            code = code[first_nl + 1:last_fence].strip("\n")
+    branch_lines = [ln for ln in code.splitlines() if ln.lstrip().startswith(("\u251c\u2500\u2500", "\u2514\u2500\u2500"))]
+    if len(branch_lines) < 1 or not code.strip():
+        return None
+    return "```treeView-beta\n" + code + "\n```"
+
+
 class VLMEnricher:
     """Enrich pdf2md box results with VLM transcription when available,
     falling back to the deterministic OCR rendering otherwise."""
@@ -341,6 +357,8 @@ class VLMEnricher:
         if mode == "A":
             return postprocess_mode_a(response)
         if mode == "B":
+            if prompt_key == "tree_to_treeview":
+                return postprocess_tree_view(response)
             return postprocess_mode_b(response)
         return postprocess_mode_c(response)
 
