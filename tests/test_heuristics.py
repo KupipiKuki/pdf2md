@@ -997,5 +997,72 @@ class TestTreeDiagramRendering(unittest.TestCase):
         self.assertIsNone(postprocess_tree_view(""))
 
 
+
+
+class TestPolishPass(unittest.TestCase):
+    """Section 13.1: tech-writer text repair pass."""
+
+    MD = ("| think that's the architecture.\n\n"
+          "```python\nclass Generator:\n    pass\n```\n\n"
+          "| Transformer T1 is connected A-Yg, and the delta winding holds.\n")
+
+    def test_split_prose_and_fences(self):
+        from docling_engineering.polish import split_prose_and_fences
+        segs = split_prose_and_fences(self.MD)
+        kinds = [k for k, _ in segs]
+        self.assertEqual(kinds, ["prose", "fence", "prose"])
+        fence = next(t for k, t in segs if k == "fence")
+        self.assertIn("class Generator:", fence)
+
+    def test_polish_repairs_misreads_keeps_fences(self):
+        from docling_engineering.polish import polish_markdown
+
+        class RepairLLM:
+            def complete_text(self, text):
+                return text.replace("| think", "I think").replace("| Transformer", "I Transformer")
+
+        out = polish_markdown(self.MD, RepairLLM())
+        self.assertIn("I think that's the architecture.", out)
+        self.assertIn("I Transformer T1", out)
+        self.assertIn("```python\nclass Generator:\n    pass\n```", out)
+        self.assertNotIn("| think", out)
+
+    def test_polish_fail_closed_on_structure_drift(self):
+        from docling_engineering.polish import polish_markdown
+
+        class DriftLLM:
+            def complete_text(self, text):
+                return text + "\nExtra line the model invented."
+
+        out = polish_markdown(self.MD, DriftLLM())
+        self.assertIn("| think that's the architecture.", out)
+
+    def test_polish_fail_closed_on_exception(self):
+        from docling_engineering.polish import polish_markdown
+
+        class BrokenLLM:
+            def complete_text(self, text):
+                raise RuntimeError("API down")
+
+        out = polish_markdown(self.MD, BrokenLLM())
+        self.assertEqual(out, self.MD)
+
+    def test_polish_noop_backend(self):
+        from docling_engineering.polish import polish_markdown
+        self.assertEqual(polish_markdown(self.MD, None), self.MD)
+
+    def test_build_polish_backend_noops(self):
+        from docling_engineering.polish import build_polish_backend
+        self.assertIsNone(build_polish_backend(None))
+        self.assertIsNone(build_polish_backend("granite"))
+        self.assertIsNone(build_polish_backend("dryrun"))
+
+    def test_build_polish_backend_adapter(self):
+        from docling_engineering.polish import build_polish_backend
+        adapter = build_polish_backend("openai:test-model@http://localhost:8000/v1")
+        self.assertIsNotNone(adapter)
+        self.assertTrue(hasattr(adapter, "complete_text"))
+
+
 if __name__ == "__main__":
     unittest.main()

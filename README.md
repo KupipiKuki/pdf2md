@@ -28,6 +28,23 @@ python scripts/pdf2md.py input.pdf -o output.md
 | `--save-images DIR` | Also save page PNGs and embed them in the Markdown |
 | `--export-crops DIR` | Save every detected box region as an isolated PNG (`pageN_boxK.png`) for VLM benchmarking and classifier training |
 | `--vlm [BACKEND]` | Route detected box crops through a Vision-Language Model for code and diagram transcription. Supports local models via `openai:<model>@<url>` (e.g. `openai:Qwen3-VL-8B-Instruct@http://localhost:8000/v1` or `local:<model>`), `granite` for local Docling Granite, `gemini-2.5-flash`, or `auto` / `dryrun`. Omitted = deterministic OCR only. |
+| `--polish BACKEND` | Tech-writer LLM pass: repairs prose OCR misreads (e.g. `\| think` -> `I think`, dropped garbage tokens) after conversion. Fenced code/JSON/Mermaid blocks are never altered. Same backend specifiers as `--vlm`; `granite` and `dryrun` are no-ops. |
+
+### Tree diagrams (`treeView-beta`)
+
+Strict hierarchical diagrams (one root, every node with exactly one parent)
+are rendered as a fenced `treeView-beta` block instead of a Mermaid flowchart:
+
+````
+```treeView-beta
+Docling
+└── EngineeringFigureExtension
+    ├── Electrical SLD
+    └── Protection Scheme
+```
+````
+
+Multi-parent diagrams (fan-in/fan-out graphs) keep the `flowchart` rendering.
 
 If the `tesseract` binary is not on your `PATH`, point to it with the
 `TESSERACT_CMD` environment variable.

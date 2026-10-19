@@ -636,7 +636,7 @@ def merge_regions(prose_lines, box_results, dpi, lang, use_mermaid=True, box_ove
 
 
 def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_mermaid=True,
-            export_crops=None, vlm_backend=None):
+            export_crops=None, vlm_backend=None, polish_backend=None):
     if not os.path.isfile(pdf_path):
         sys.exit(f"File not found: {pdf_path}")
     try:
@@ -780,6 +780,14 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
         sh.rmtree(temp_crops_dir, ignore_errors=True)
 
     markdown = "\n".join(parts)
+    if polish_backend:
+        from docling_engineering.polish import build_polish_backend, polish_markdown
+        adapter = build_polish_backend(polish_backend)
+        if adapter is None:
+            print("[pdf2md] --polish: backend is a no-op for text repair; skipping.",
+                  file=sys.stderr)
+        else:
+            markdown = polish_markdown(markdown, adapter)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(markdown + "\n")
     print(f"Wrote {out_path} ({len(markdown)} chars)", file=sys.stderr)
@@ -840,6 +848,14 @@ def main():
              "'granite' for local Docling Granite model, 'gemini-2.5-flash', or 'dryrun'. "
              "Omitted: no VLM (deterministic OCR). Plain '--vlm': auto-detect backend.",
     )
+    ap.add_argument(
+        "--polish",
+        metavar="BACKEND",
+        default=None,
+        help="Route the converted prose through a text-repair LLM pass "
+             "(fixes OCR misreads like '| think' -> 'I think'). BACKEND uses "
+             "the same specifiers as --vlm; 'granite' and 'dryrun' are no-ops.",
+    )
     args = ap.parse_args()
 
     configure_tesseract()
@@ -847,7 +863,7 @@ def main():
     out = args.output or os.path.splitext(args.pdf)[0] + ".md"
     convert(args.pdf, out, args.lang, args.dpi, args.prefer_text_layer, args.save_images,
             use_mermaid=not args.no_mermaid, export_crops=args.export_crops,
-            vlm_backend=args.vlm)
+            vlm_backend=args.vlm, polish_backend=getattr(args, "polish", None))
 
 
 if __name__ == "__main__":
