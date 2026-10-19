@@ -31,6 +31,13 @@ from .rules import sequence_markdown
 
 FENCE_RE = re.compile(r"```(\w+)?\n(.*?)```", re.DOTALL)
 
+VLM_DEBUG = bool(os.environ.get("PDF2MD_DEBUG"))
+
+
+def _dbg(msg):
+    if VLM_DEBUG:
+        print(f"[pdf2md:vlm] {msg}", file=sys.stderr)
+
 
 class OpenAICompatBackend:
     """OpenAI-compatible multimodal backend for local LLMs (Unsloth, vLLM, Ollama,
@@ -88,8 +95,9 @@ class OpenAICompatBackend:
                     text_parts = [p.get("text", "") for p in content if isinstance(p, dict)]
                     return "".join(text_parts).strip()
                 return (content or "").strip()
-        except Exception:
+        except Exception as exc:
             # Fall back to deterministic OCR rendering on connection error or timeout
+            _dbg(f"{type(self).__name__}.complete failed for {image_path!r}: {exc!r}")
             return ""
 
 

@@ -29,6 +29,7 @@ python scripts/pdf2md.py input.pdf -o output.md
 | `--export-crops DIR` | Save every detected box region as an isolated PNG (`pageN_boxK.png`) for VLM benchmarking and classifier training |
 | `--vlm [BACKEND]` | Route detected box crops through a Vision-Language Model for code and diagram transcription. Supports local models via `openai:<model>@<url>` (e.g. `openai:Qwen3-VL-8B-Instruct@http://localhost:8000/v1` or `local:<model>`), `granite` for local Docling Granite, `gemini-2.5-flash`, or `auto` / `dryrun`. Omitted = deterministic OCR only. |
 | `--polish BACKEND` | Tech-writer LLM pass: repairs prose OCR misreads (e.g. `\| think` -> `I think`, dropped garbage tokens) after conversion. Fenced code/JSON/Mermaid blocks are never altered. Same backend specifiers as `--vlm`; `granite` and `dryrun` are no-ops. |
+| `PDF2MD_DEBUG=1` | Env var: verbose stderr diagnostics for VLM and polish stages — backend connection/call errors, per-segment polish outcomes (polished / unchanged / line-drift rejected / empty / error). |
 | `--no-pause` | By default, when both `--vlm` and `--polish` are given, pdf2md pauses after the VLM stage and waits for Enter, so you can unload the VLM and load the polish model (only one local LLM fits on a single GPU). Ctrl+C at the prompt skips polishing. |
 
 ### Tree diagrams (`treeView-beta`)

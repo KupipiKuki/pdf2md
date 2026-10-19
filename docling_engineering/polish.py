@@ -13,7 +13,16 @@ Backend reuse: the Section 11 `build_backend` table. `granite` and
 an instruction-following LLM; dryrun has no model at all).
 """
 
+import os
 import re
+import sys
+
+POLISH_DEBUG = bool(os.environ.get("PDF2MD_DEBUG"))
+
+
+def _dbg(msg):
+    if POLISH_DEBUG:
+        print(f"[pdf2md:polish] {msg}", file=sys.stderr)
 
 POLISH_PROMPT = """You are a technical editor repairing OCR output.
 Fix ONLY character-level OCR misreads that create grammatical errors, e.g.:
@@ -63,24 +72,39 @@ def polish_markdown(markdown, backend, min_chars=20):
         return markdown
     segments = split_prose_and_fences(markdown)
     out = []
-    for kind, text in segments:
+    n_prose = sum(1 for k, _ in segments if k == "prose")
+    n_fenced = sum(1 for k, _ in segments if k == "fence")
+    _dbg(f"segments: {n_prose} prose, {n_fenced} fenced (fences never sent)")
+    for i, (kind, text) in enumerate(segments):
         if kind == "fence" or not text.strip():
             out.append(text)
             continue
         if len(text.strip()) < min_chars:
+            _dbg(f"segment {i}: skipped ({len(text.strip())} chars < {min_chars})")
             out.append(text)
             continue
         try:
             polished = backend.complete_text(text) or ""
-        except Exception:
+        except Exception as exc:
+            _dbg(f"segment {i}: backend error: {exc!r}")
             polished = ""
         polished = polished.strip()
         original_lines = [ln for ln in text.splitlines() if ln.strip()]
         new_lines = [ln for ln in polished.splitlines() if ln.strip()]
         # Fail-closed: reject empty or structurally drifted responses
-        if not polished or len(new_lines) != len(original_lines):
+        if not polished:
+            _dbg(f"segment {i}: empty response -> kept original")
             out.append(text)
             continue
+        if len(new_lines) != len(original_lines):
+            _dbg(f"segment {i}: line drift "
+                 f"({len(original_lines)} -> {len(new_lines)} lines) -> kept original")
+            out.append(text)
+            continue
+        if polished == text.strip():
+            _dbg(f"segment {i}: unchanged response")
+        else:
+            _dbg(f"segment {i}: polished OK")
         out.append(polished + ("\n" if text.endswith("\n") else ""))
     return "".join(out)
 
