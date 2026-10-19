@@ -1078,3 +1078,105 @@ The full standalone report is recorded in [`docs/justification_report.md`](docs/
 - **Docling + Multimodal VLM + Rule Engine (Option B — Selected):** Unlocks genuine engineering understanding by having Docling isolate figure crops, routing them through targeted VLM prompts (Mode A code transcription, Mode B Mermaid synthesis, Mode C SLD topology extraction), and feeding the extracted topology into Python engineering rule engines (`networkx`).
 - **Resilience:** Section 11's tiered fallback architecture (`gemini` -> local `openai:` -> local `granite` -> deterministic OCR) guarantees zero-cost offline resilience without sacrificing visual intelligence when VLMs are available.
 
+
+---
+
+## 13. Spec: Tech-Writer Post-Processing Pass and Tree-Diagram Rendering (for the coder)
+
+Two follow-ups emerged from comparing the deterministic output against
+`ref_output.md` (QAQC Section 10.2 residuals):
+
+1. **Textual repair**: the OCR misread `I` -> `|` (e.g. `| think that's...`,
+   `| Transformer T1...`) and garbage tokens (e.g. `re", "r1"4,` in the page 2
+   `connections` array) are grammatical/structural errors a language model can
+   detect and repair without touching the document image.
+2. **Diagram fidelity**: the page 5 figure is a **tree** (root `Docling` with
+   branches `EngineeringFigureExtension` -> leaf categories), but the current
+   `parse_ascii_diagram_to_mermaid` forces every ASCII diagram into a
+   `flowchart`. A tree has a single root and no cross-links; rendering it as a
+   flowchart loses that structure.
+
+### 13.1 Tech-writer LLM pass (`--polish`, new optional stage)
+
+- New module `docling_engineering/polish.py`: a **text-only** post-processing
+  stage that runs *after* deterministic rendering and VLM enrichment, before the
+  final Markdown assembly. It never sees crop images; it repairs text.
+- CLI: `--polish` (off by default; opt-in flag on `scripts/pdf2md.py`).
+- Backend reuse: resolve via `build_backend` (`gemini-*`, `openai:<model>@<url>`,
+  `granite` -> no-op, `dryrun` -> no-op). Granite is always a no-op here: it is
+  a document-conversion model, not an instruction-following LLM (Section 11.2
+  constraint applies).
+- New `TechWriterBackend` wrapper contract: `polish(markdown_chunks) -> markdown_chunks`
+  where each chunk is a `(box_id, text)` pair. Chunks are sent individually with
+  a strict repair prompt:
+  - Fix OCR character-level misreads that produce grammatical errors
+    (`| think` -> `I think`, `| Transformer` -> `I Transformer`,
+    `| were extending` -> `I were`/`I'd` per context).
+  - Remove or repair garbage tokens (`re", "r1"4,` -> `["G", "T1"],` only when
+    the surrounding structure implies it; otherwise drop the token).
+  - **Never** alter code blocks, JSON payloads, Mermaid blocks, or indentation.
+    The prompt must state: fenced blocks are immutable; only prose lines may
+    change. Validate post-response that fenced blocks are byte-identical; if
+    not, keep the original chunk (fail-closed).
+- Acceptance (13.4): `| think` occurrences drop to 0 on the reference PDF run;
+  benchmark similarity vs `ref_output.md` must not decrease (>= 0.708).
+
+### 13.2 Tree-diagram detection and `treeView-beta` rendering
+
+- Extend the classifier (`docling_engineering/classifier.py`): within
+  `flowchart_or_tree`, detect the **tree** sub-shape on the OCR text:
+  - exactly one root (a node with no incoming edge),
+  - every other node has exactly one parent (in-degree 1),
+  - no cross-links (max fan-out unlimited, but no cycles, no multi-parent).
+  The existing `parse_ascii_diagram_to_mermaid` graph builder already computes
+  in/out degrees; expose an `is_tree(mermaid_edges)` helper on its edge list.
+- New category `tree_diagram` (before `flowchart_or_tree` in
+  `classify_text`), mapped to Mode B with a new prompt key `tree_to_treeview`.
+- New deterministic renderer `render_tree_view(ocr_lines) -> str`: instead of
+  Mermaid, emit a plain-text tree view (this is a rendering, not a model task):
+
+  ```
+  treeView-beta
+
+  ├── src/
+  │   ├── index.ts
+  │   └── utils.ts
+  ├── package.json
+  └── README.md
+  ```
+
+  fenced in a ``` block with language tag `treeView-beta` (renders natively
+  in GitHub/GitLab Markdown). Nodes and nesting derive from the same
+  parent/child structure the flowchart parser already extracts.
+- `flowchart_or_tree` keeps the flowchart path only for true multi-parent
+  graphs (the page 1 pipeline diagram stays a `flowchart`).
+- VLM Mode B for trees: prompt the model to return the tree-view text
+  directly (no Mermaid coercion); deterministic renderer remains the fallback.
+
+### 13.3 Scope guardrails
+
+- `--polish` and tree detection are **independent**: tree rendering is pure
+  deterministic logic (testable without any model); the polish pass needs a
+  live LLM and can land separately.
+- No changes to Mode C / rule engine, benchmark gate, or the Section 11
+  backend table.
+- Unit tests must not require network or model downloads; mock the LLM
+  client as in the Section 11.4 tests.
+
+### 13.4 Tests and acceptance
+
+1. Unit: `is_tree` on edge lists: a chain, a star, a single root multi-parent
+   graph (false), a cycle (false), an empty graph (false).
+2. Unit: `render_tree_view` produces the exact fenced `treeView-beta` block
+   for a synthetic OCR tree input (indentation `├──`/`└──`/`│` characters).
+3. Unit: classifier routes a tree-shaped OCR text to `tree_diagram` and the
+   page-5-style flowchart text to `flowchart_or_tree`.
+4. Unit: `TechWriterBackend.polish` with a mocked LLM repairs `| think` ->
+   `I think`; a response that mutates a fenced block is rejected (original
+   returned).
+5. Unit: `--polish` with `granite`/`dryrun` backends is a no-op
+   (byte-identical output).
+6. Manual (user, needs live LLM): run
+   `python scripts/pdf2md.py electricalDiagramOCR.pdf -o out.md --vlm <backend> --polish`
+   and confirm the QAQC Section 10.2 residuals (`| think`, `re", "r1"4,`)
+   are repaired and the benchmark gate (>= 0.590) still passes.
