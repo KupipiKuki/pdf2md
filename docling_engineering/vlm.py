@@ -50,9 +50,19 @@ class OpenAICompatBackend:
 
     TIMEOUT_SECONDS = 60
 
+    URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d+)?(/.*)?$")
+
     def __init__(self, model="Qwen3-VL-8B-Instruct", base_url="http://localhost:8000/v1", api_key=None):
         self.model = model or "Qwen3-VL-8B-Instruct"
         self.base_url = (base_url or "http://localhost:8000/v1").rstrip("/")
+        if not self.URL_RE.match(self.base_url):
+            print(
+                f"[docling-engineering] OpenAI-compatible backend base_url looks "
+                f"malformed: {self.base_url!r} (expected e.g. "
+                f"'http://localhost:8000/v1'). Check the @<url> part of the "
+                "--vlm/--polish specifier.",
+                file=sys.stderr,
+            )
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "not-needed")
         self._unreachable_warned = False
 
