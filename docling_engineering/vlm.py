@@ -109,9 +109,17 @@ class OpenAICompatBackend:
         except Exception as exc:
             # Fall back to deterministic OCR rendering on connection error or timeout
             if not self._unreachable_warned:
+                detail = ""
+                body = getattr(exc, "read", None)
+                if body is not None:
+                    try:
+                        detail = " :: " + body().decode("utf-8", "replace")[:500]
+                    except Exception:
+                        pass
                 print(
                     f"[docling-engineering] OpenAI-compatible backend ({self.base_url}) "
-                    f"unreachable or call failed: {exc}; falling back to deterministic OCR.",
+                    f"unreachable or call failed: {exc}{detail}; "
+                    "falling back to deterministic OCR.",
                     file=sys.stderr,
                 )
                 self._unreachable_warned = True
@@ -151,9 +159,17 @@ class OpenAICompatBackend:
                 return (content or "").strip()
         except Exception as exc:
             if not self._unreachable_warned:
+                detail = ""
+                body = getattr(exc, "read", None)
+                if body is not None:
+                    try:
+                        detail = " :: " + body().decode("utf-8", "replace")[:500]
+                    except Exception:
+                        pass
                 print(
                     f"[docling-engineering] OpenAI-compatible backend ({self.base_url}) "
-                    f"unreachable or call failed: {exc}; falling back to deterministic OCR.",
+                    f"unreachable or call failed: {exc}{detail}; "
+                    "falling back to deterministic OCR.",
                     file=sys.stderr,
                 )
                 self._unreachable_warned = True
