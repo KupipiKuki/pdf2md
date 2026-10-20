@@ -87,6 +87,7 @@ def polish_markdown(markdown, backend, min_chars=20):
             stats["skipped"] += 1
             out.append(text)
             continue
+        leading_ws = text[:len(text) - len(text.lstrip())]
         try:
             polished = backend.complete_text(text) or ""
         except Exception as exc:
@@ -121,7 +122,7 @@ def polish_markdown(markdown, backend, min_chars=20):
         else:
             _dbg(f"segment {i}: polished OK")
             stats["polished"] += 1
-        out.append(polished + ("\n" if text.endswith("\n") else ""))
+        out.append(leading_ws + polished + ("\n" if text.endswith("\n") else ""))
     print(
         "[pdf2md:polish] prose segments: "
         f"{stats['polished']} polished, {stats['unchanged']} unchanged, "

@@ -1061,6 +1061,18 @@ class TestPolishPass(unittest.TestCase):
         self.assertIn("```python\nclass Generator:\n    pass\n```", out)
         self.assertNotIn("| think", out)
 
+    def test_polish_preserves_leading_whitespace_after_fence(self):
+        from docling_engineering.polish import polish_markdown
+
+        class RepairLLM:
+            def complete_text(self, text):
+                return text.replace("| think", "I think")
+
+        md = "```python\nx = 1\n```\n\n| think this follows the fence.\n"
+        out = polish_markdown(md, RepairLLM())
+        # The blank line between the closing fence and the prose must survive
+        self.assertIn("```\n\nI think this follows the fence.", out)
+
     def test_polish_fail_closed_on_structure_drift(self):
         from docling_engineering.polish import polish_markdown
 
