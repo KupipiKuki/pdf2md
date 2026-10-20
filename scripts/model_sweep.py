@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Model sweep for pdf2md VLM backends (handoff Section 11.5).
+"""Model sweep for pdf2md VLM and polish backends (handoff Section 11.5).
 
-Runs the full pipeline once per candidate local model, benchmarks each
-output against ref_output.md, and reports a ranking. Because only one
+Runs the full pipeline once per candidate local model (--mode vlm sends
+crops to the model as a vision backend; --mode polish uses the text-only
+repair path), benchmarks each output against ref_output.md, and reports
+a ranking. Because only one
 local LLM can be loaded at a time (single GPU), the sweep is
 interactive: after each run it pauses and prompts the user to load the
 next model before continuing. Safe to re-run: models that already have
@@ -14,9 +16,11 @@ Usage:
                  openai:Llama-3.2-11B-Vision@http://127.0.0.1:8080/v1 \\
         [--ref ref_output.md] [--out-dir scratch/sweep]
 
-Each run executes:
-    python scripts/pdf2md.py <pdf> -o <out-dir>/<slug>.md --vlm <model>
-    python scripts/benchmark_ref.py <out-dir>/<slug>.md <ref>
+Each run executes (--mode vlm):
+    python scripts/pdf2md.py <pdf> -o <out-dir>/<slug>.vlm.md --vlm <model>
+or (--mode polish, for text-only local models):
+    python scripts/pdf2md.py <pdf> -o <out-dir>/<slug>.polish.md --polish <model>
+then benchmarks the output against the reference.
 """
 
 import argparse
@@ -39,8 +43,9 @@ def model_slug(spec):
     return slug or "model"
 
 
-def run_pipeline(pdf, out_path, spec):
-    cmd = [sys.executable, PDF2MD, pdf, "-o", out_path, "--vlm", spec]
+def run_pipeline(pdf, out_path, spec, mode="vlm"):
+    flag = "--vlm" if mode == "vlm" else "--polish"
+    cmd = [sys.executable, PDF2MD, pdf, "-o", out_path, flag, spec]
     print(f"\n[sweep] running: {' '.join(cmd)}", file=sys.stderr)
     return subprocess.run(cmd).returncode
 
@@ -66,6 +71,10 @@ def main():
                     help="Reference markdown (default: ref_output.md)")
     ap.add_argument("--out-dir", default=os.path.join(REPO, "scratch", "sweep"),
                     help="Directory for per-model outputs and results")
+    ap.add_argument("--mode", choices=["vlm", "polish"], default="vlm",
+                    help="Benchmark models as --vlm backends (vision) or --polish "
+                         "backends (text-only repair). Text-only local models "
+                         "(Phi-4, Qwen2.5-Instruct, Mistral-Nemo) must use --mode polish.")
     ap.add_argument("--force", action="store_true",
                     help="Re-run models that already have a result")
     args = ap.parse_args()
@@ -76,8 +85,8 @@ def main():
 
     for idx, spec in enumerate(args.models, start=1):
         slug = model_slug(spec)
-        out_path = os.path.join(args.out_dir, f"{slug}.md")
-        ratio_path = os.path.join(args.out_dir, f"{slug}.ratio.txt")
+        out_path = os.path.join(args.out_dir, f"{slug}.{args.mode}.md")
+        ratio_path = os.path.join(args.out_dir, f"{slug}.{args.mode}.ratio.txt")
 
         if not args.force and os.path.isfile(ratio_path):
             with open(ratio_path, encoding="utf-8") as f:
@@ -97,7 +106,7 @@ def main():
             print("[sweep] aborted by user", file=sys.stderr)
             break
 
-        rc = run_pipeline(args.pdf, out_path, spec)
+        rc = run_pipeline(args.pdf, out_path, spec, mode=args.mode)
         if rc != 0:
             print(f"[sweep] pipeline failed for {spec} (exit {rc}); skipping",
                   file=sys.stderr)
@@ -112,7 +121,7 @@ def main():
         results.append((spec, ratio, out_path))
         print(report)
 
-    print("\n=== Sweep results (best first) ===")
+    print(f"\n=== Sweep results ({args.mode} mode, best first) ===")
     for spec, ratio, out_path in sorted(results, key=lambda r: -r[1]):
         print(f"{ratio:.3f}  {spec}  -> {out_path}")
     if not results:

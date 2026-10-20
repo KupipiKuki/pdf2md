@@ -1139,18 +1139,52 @@ class TestModelSweep(unittest.TestCase):
                 "--ref", os.path.join(tmp, "ref.md"),
                 "--out-dir", out_dir]
         try:
-            with patch.object(sweep, "run_pipeline", side_effect=fake_run_pipeline), \
+            def fake_run(pdf, out_path, spec, mode="vlm"):
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write("converted by " + spec + "\n")
+                return 0
+
+            with patch.object(sweep, "run_pipeline", side_effect=fake_run), \
                  patch.object(sweep, "run_benchmark", side_effect=fake_benchmark), \
                  patch("builtins.input", return_value=""):
                 with patch.object(sys, "argv", argv):
                     rc = sweep.main()
             self.assertEqual(rc, 0)
-            good = os.path.join(out_dir, "good-model.md")
-            bad = os.path.join(out_dir, "bad-model.md")
+            good = os.path.join(out_dir, "good-model.vlm.md")
+            bad = os.path.join(out_dir, "bad-model.vlm.md")
             self.assertTrue(os.path.isfile(good))
             self.assertTrue(os.path.isfile(bad))
-            with open(os.path.join(out_dir, "good-model.ratio.txt")) as f:
+            with open(os.path.join(out_dir, "good-model.vlm.ratio.txt")) as f:
                 self.assertEqual(f.read().strip(), "0.9")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_polish_mode_uses_polish_flag(self):
+        import tempfile
+        import shutil
+        from unittest.mock import patch
+        import scripts.model_sweep as sweep
+
+        tmp = tempfile.mkdtemp()
+        fake_pdf = os.path.join(tmp, "doc.pdf")
+        open(fake_pdf, "w").close()
+        out_dir = os.path.join(tmp, "sweep")
+
+        argv = ["model_sweep.py", fake_pdf, "--mode", "polish",
+                "--models", "openai:phi4@http://localhost:9/v1",
+                "--ref", os.path.join(tmp, "ref.md"), "--out-dir", out_dir]
+        try:
+            with patch.object(sweep, "run_pipeline") as mock_run, \
+                 patch.object(sweep, "run_benchmark",
+                              return_value=(0.8, "ratio 0.8")) as mock_bench, \
+                 patch("builtins.input", return_value=""):
+                with patch.object(sys, "argv", argv):
+                    rc = sweep.main()
+            self.assertEqual(rc, 0)
+            mode = mock_run.call_args.kwargs.get("mode")
+            self.assertEqual(mode, "polish")
+            out_path = mock_run.call_args.args[1]
+            self.assertIn("phi4.polish.md", out_path)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1165,7 +1199,7 @@ class TestModelSweep(unittest.TestCase):
         open(fake_pdf, "w").close()
         out_dir = os.path.join(tmp, "sweep")
         os.makedirs(out_dir)
-        with open(os.path.join(out_dir, "cached-model.ratio.txt"), "w") as f:
+        with open(os.path.join(out_dir, "cached-model.vlm.ratio.txt"), "w") as f:
             f.write("0.75\n")
 
         argv = ["model_sweep.py", fake_pdf, "--models", "openai:cached-model@http://x/v1",

@@ -61,9 +61,17 @@ python scripts/model_sweep.py electricalDiagramOCR.pdf \
              openai:qwen2.5-vl:7b@http://localhost:11434/v1
 ```
 
-Each run writes `scratch/sweep/<model>.md` plus a cached `<model>.ratio.txt`;
-re-running skips models that already have results (`--force` to redo). The final
-table ranks all models by similarity against `ref_output.md`.
+By default models are benchmarked as `--vlm` backends (vision: crops are sent as
+images, so the model must be vision-capable with its mmproj projector loaded).
+Use `--mode polish` for **text-only** models (Phi-4, Qwen2.5-Instruct,
+Mistral-Nemo, etc.): they run through the `--polish` text-repair path instead —
+no image parts, matching how those models reject `image_url` payloads.
+
+Each run writes `scratch/sweep/<model>.<mode>.md` plus a cached
+`<model>.<mode>.ratio.txt`; re-running skips models that already have results
+(`--force` to redo). The final table ranks all models by similarity against
+`ref_output.md`. Results from a failed run (e.g. server 500s) are cached like
+any other — delete the `.ratio.txt` or use `--force` to re-benchmark.
 
 If the `tesseract` binary is not on your `PATH`, point to it with the
 `TESSERACT_CMD` environment variable.
