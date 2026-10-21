@@ -19,6 +19,8 @@ from pdf2md import (
     looks_like_list,
     looks_like_code,
     clean_block_lines,
+    repair_prose_pipe,
+    repair_code_line_punct,
 )
 
 
@@ -252,6 +254,28 @@ class TestCrossPageContinuation(unittest.TestCase):
         cont, rest = boxes_continuing(None, boxes)
         self.assertEqual(cont, [])
         self.assertEqual(rest, boxes)
+
+
+class TestCharacterRepair(unittest.TestCase):
+    def test_prose_pipe_to_letter(self):
+        self.assertEqual(repair_prose_pipe("| think that's actually"), "I think that's actually")
+        self.assertEqual(repair_prose_pipe("currents | from propagating"), "currents I from propagating")
+
+    def test_ascii_chain_pipe_preserved(self):
+        self.assertEqual(repair_prose_pipe("G | T1 | LINE | T2 | M"), "G | T1 | LINE | T2 | M")
+        self.assertEqual(repair_prose_pipe("|- delta"), "|- delta")
+        self.assertEqual(repair_prose_pipe("a |-> b"), "a |-> b")
+
+    def test_lone_punct_line_dropped(self):
+        self.assertEqual(repair_code_line_punct(":"), "")
+        self.assertEqual(repair_code_line_punct(";"), "")
+        self.assertEqual(repair_code_line_punct("pass"), "pass")
+        self.assertEqual(repair_code_line_punct("if x:"), "if x:")
+
+    def test_title_prefix_strip(self):
+        import pdf2md as p
+        self.assertEqual(p.strip_title_noise("Cz5IuxVR-electricalDiagramOCR"), "electricalDiagramOCR")
+        self.assertEqual(p.strip_title_noise("electricalDiagramOCR"), "electricalDiagramOCR")
 
 
 if __name__ == "__main__":

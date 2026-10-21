@@ -496,6 +496,24 @@ def clean_block_lines(block):
     return filtered
 
 
+PROSE_PIPE_RE = re.compile(
+    r"(?<![\w\"'>(/\\])\|(?![\w\"'</)\\]|\s*[-=]>|\s*\})"
+)
+
+
+def repair_prose_pipe(text):
+    """Repair OCR pipe/I confusion in prose: a standalone '|' that is
+    followed by a lowercase word (where a pronoun 'I' fits, not a chain
+    node label) is a misread 'I'. Chain separators like 'G | T1' and
+    arrow/table syntax are preserved."""
+    def _sub(m):
+        rest = text[m.end():]
+        if re.match(r"\s*[a-z\u2019']", rest):
+            return "I"
+        return m.group(0)
+    return PROSE_PIPE_RE.sub(_sub, text)
+
+
 def render_block(block, median_height, max_size):
     """Convert one block of lines into Markdown."""
     block = clean_block_lines(block)
@@ -507,6 +525,9 @@ def render_block(block, median_height, max_size):
 
     if not text:
         return None
+
+    texts = [repair_prose_pipe(t) for t in texts]
+    text = " ".join(texts).strip()
 
     is_single = len(block) == 1
     big = first.get("size", 0) >= max_size * 0.98 or first["height"] >= HEADING_HEIGHT_RATIO * median_height
@@ -1005,8 +1026,27 @@ def clean_box_text(text):
             if re.search(r"[})\]]$", stem):
                 line = stem.rstrip()
         if line:
+            line = repair_code_line_punct(line)
+        if line:
             out.append(line)
     return "\n".join(out)
+
+
+LONE_PUNCT_LINE_RE = re.compile(r"^[;:]$")
+
+
+def strip_title_noise(title):
+    """Remove random run-ID prefixes OCR or tooling glued onto the file
+    stem, e.g. 'Cz5IuxVR-electricalDiagramOCR' -> 'electricalDiagramOCR'."""
+    return re.sub(r"^[A-Za-z0-9]{7,}[-_]", "", title, count=1)
+
+
+def repair_code_line_punct(line):
+    """Drop OCR-noise code lines that consist of a lone ';' or ':': they
+    have no structural meaning on their own in a fenced block."""
+    if LONE_PUNCT_LINE_RE.fullmatch(line):
+        return ""
+    return line
 
 
 def merge_regions(prose_lines, box_results, dpi, lang, use_mermaid=True):
@@ -1093,7 +1133,8 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
     except Exception as e:
         sys.exit(f"Cannot open PDF: {e}")
 
-    parts = [f"# {os.path.splitext(os.path.basename(pdf_path))[0]}", ""]
+    title = strip_title_noise(os.path.splitext(os.path.basename(pdf_path))[0])
+    parts = [f"# {title}", ""]
     open_fence = None       # (tag, [lines]) of a fenced block awaiting continuation
     prev_page_state = None  # (box, text, near_bottom, page_h)
 
