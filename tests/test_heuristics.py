@@ -127,6 +127,43 @@ class TestMermaidDiagramConversion(unittest.TestCase):
         ok2, _ = parse_ascii_diagram_to_mermaid(not_chain)
         self.assertFalse(ok2)
 
+    def test_tree_marker_depth_not_keywords(self):
+        # Branch parents come from marker depth (L_ vs |-), not from
+        # keyword matching on labels.
+        tree = [
+            "Docling",
+            "L_ EngineeringFigureExtension",
+            "|- Electrical SLD",
+            "|- Protection Scheme",
+            "Je Civil Drawing",
+            "r- P&ID",
+            "|- Mechanical Assembly",
+            "|- Control Narrative",
+        ]
+        ok, code = parse_ascii_diagram_to_mermaid(tree)
+        self.assertTrue(ok)
+        edges = [l.strip() for l in code.splitlines() if "-->" in l or "---" in l]
+        self.assertIn("EngineeringF_2 --> ElectricalSL_3", edges)
+        self.assertIn("EngineeringF_2 --> CivilDrawing_5", edges)
+        self.assertIn("EngineeringF_2 --> PID_6", edges)
+        self.assertIn("EngineeringF_2 --> MechanicalAs_7", edges)
+        self.assertIn("EngineeringF_2 --> ControlNarra_8", edges)
+        self.assertNotIn("ProtectionSc_4 --> PID_6", edges)
+        self.assertNotIn("Docling_1 --> CivilDrawing_5", edges)
+
+    def test_sibling_fan_in_converges_to_next_trunk(self):
+        # >=2 sibling branches followed by a trunk node: all siblings
+        # converge into that node (fan-in), and the chain skips the
+        # redundant parent->trunk edge.
+        diag = ["Start", "L_ Group", "|- A", "|- B", "|- C", "Results"]
+        ok, code = parse_ascii_diagram_to_mermaid(diag)
+        self.assertTrue(ok)
+        edges = [l.strip() for l in code.splitlines() if "-->" in l or "---" in l]
+        self.assertIn("A_3 --> Results_6", edges)
+        self.assertIn("B_4 --> Results_6", edges)
+        self.assertIn("C_5 --> Results_6", edges)
+        self.assertNotIn("Start_1 --> Results_6", edges)
+
     def test_bullet_list_not_diagram(self):
         bullet_text = [
             "Analyze this diagram",

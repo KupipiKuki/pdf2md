@@ -320,6 +320,10 @@ def parse_ascii_diagram_to_mermaid(lines):
 
     # 2. Flowchart and tree markers
     arrow_pattern = re.compile(r"^(\||\bv\b|\bV\b|Vv|▼|↓|\^|--+>|==+>)+$", re.IGNORECASE)
+    branch1_prefix = re.compile(r"^[|\[\]\(\)]*\s*(?:L[-_.]|└┘|\+-)\s*(.*)$")
+    branch2_prefix = re.compile(
+        r"^[|\[\]\(\)]*\s*(?:\|-|\+-|r[-_.]|├┟|[JjFfIil][eE—–\-])\s*(.*)$"
+    )
     tree_branch_prefix = re.compile(r"^([|\[\]\(\)]*\s*(?:\|-|\+-|L[-_.]|r[-_.]|[├└\u2500-\u257f])\s*)(.*)$")
 
     arrow_lines = 0
@@ -361,8 +365,8 @@ def parse_ascii_diagram_to_mermaid(lines):
 
     current_main_node = None
     last_node = None
-    current_tree_parent = None
-    sub_parent = None
+    branch1_parent = None
+    sibling_run = []
 
     i = 0
     n = len(cleaned_lines)
@@ -372,9 +376,8 @@ def parse_ascii_diagram_to_mermaid(lines):
             i += 1
             continue
 
-        m_tree = tree_branch_prefix.match(raw)
-        is_tree_branch = bool(m_tree or raw.startswith("| ") or raw.startswith("|-") or raw.startswith("L-") or raw.startswith("L_"))
-
+        m1 = branch1_prefix.match(raw)
+        m2 = bool(branch2_prefix.match(raw) or raw.startswith("| ") or raw.startswith("|-"))
         lbl = recover_numeric_misread(clean_label(raw))
         if not lbl:
             i += 1
@@ -383,41 +386,46 @@ def parse_ascii_diagram_to_mermaid(lines):
         nid = make_id(lbl)
         nodes.append((nid, lbl))
 
-        if is_tree_branch:
-            prefix = m_tree.group(1) if m_tree else raw
-            if ("L_" in prefix or "L." in prefix or "L-" in prefix or "└" in prefix) and sub_parent:
-                edges.append((sub_parent, nid))
-                sub_parent = None
+        if m1 or m2:
+            sibling_run = [] if m1 else sibling_run
+            if m1:
+                parent = current_main_node or last_node
+                branch1_parent = nid
             else:
-                parent = current_tree_parent or current_main_node or last_node
-                if parent and parent != nid:
-                    edges.append((parent, nid))
-
-                lbl_lower = lbl.lower()
-                if any(w in lbl_lower for w in ["detector", "extension", "drawing", "scheme"]):
-                    current_tree_parent = nid
-                elif any(w in lbl_lower for w in ["text", "tables", "sld"]):
-                    if "route here" in lbl_lower or "&lt;--" in lbl or "<--" in lbl:
-                        current_main_node = nid
-                    else:
-                        sub_parent = nid
+                parent = branch1_parent or current_main_node or last_node
+                sibling_run.append(nid)
+            if parent and parent != nid:
+                edges.append((parent, nid))
         else:
             prev_has_arrow = (i > 0 and arrow_pattern.match(cleaned_lines[i-1]))
             if prev_has_arrow:
+                if len(sibling_run) >= 2:
+                    for sib in sibling_run:
+                        if sib != nid:
+                            edges.append((sib, nid))
+                sibling_run = []
+                branch1_parent = None
                 parent = current_main_node or last_node
                 if parent and parent != nid:
                     edges.append((parent, nid))
                 current_main_node = nid
-                current_tree_parent = None
-                sub_parent = None
             else:
                 if not current_main_node:
                     current_main_node = nid
                 else:
+                    converged = len(sibling_run) >= 2 and any(
+                        sib != nid for sib in sibling_run
+                    )
+                    if len(sibling_run) >= 2:
+                        for sib in sibling_run:
+                            if sib != nid:
+                                edges.append((sib, nid))
                     parent = current_main_node
-                    if parent != nid:
+                    if parent != nid and not converged:
                         edges.append((parent, nid))
                     current_tree_parent = nid
+                sibling_run = []
+                branch1_parent = None
         last_node = nid
         i += 1
 
