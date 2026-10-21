@@ -2,6 +2,7 @@
 """Unit tests for pdf2md pure heuristics and structure parsing."""
 
 import json
+import re
 import unittest
 import sys
 import os
@@ -21,6 +22,10 @@ from pdf2md import (
     looks_like_list,
     looks_like_code,
     clean_block_lines,
+    repair_prose_pipe,
+    repair_code_line_punct,
+    strip_title_noise,
+    HEADING_CUE_RE,
     reconstruct_indented_lines,
 )
 
@@ -131,6 +136,43 @@ class TestMermaidDiagramConversion(unittest.TestCase):
         ok2, _ = parse_ascii_diagram_to_mermaid(not_chain)
         self.assertFalse(ok2)
 
+    def test_tree_marker_depth_not_keywords(self):
+        # Branch parents come from marker depth (L_ vs |-), not from
+        # keyword matching on labels.
+        tree = [
+            "Docling",
+            "L_ EngineeringFigureExtension",
+            "|- Electrical SLD",
+            "|- Protection Scheme",
+            "Je Civil Drawing",
+            "r- P&ID",
+            "|- Mechanical Assembly",
+            "|- Control Narrative",
+        ]
+        ok, code = parse_ascii_diagram_to_mermaid(tree)
+        self.assertTrue(ok)
+        edges = [l.strip() for l in code.splitlines() if "-->" in l or "---" in l]
+        self.assertIn("EngineeringF_2 --> ElectricalSL_3", edges)
+        self.assertIn("EngineeringF_2 --> CivilDrawing_5", edges)
+        self.assertIn("EngineeringF_2 --> PID_6", edges)
+        self.assertIn("EngineeringF_2 --> MechanicalAs_7", edges)
+        self.assertIn("EngineeringF_2 --> ControlNarra_8", edges)
+        self.assertNotIn("ProtectionSc_4 --> PID_6", edges)
+        self.assertNotIn("Docling_1 --> CivilDrawing_5", edges)
+
+    def test_sibling_fan_in_converges_to_next_trunk(self):
+        # >=2 sibling branches followed by a trunk node: all siblings
+        # converge into that node (fan-in), and the chain skips the
+        # redundant parent->trunk edge.
+        diag = ["Start", "L_ Group", "|- A", "|- B", "|- C", "Results"]
+        ok, code = parse_ascii_diagram_to_mermaid(diag)
+        self.assertTrue(ok)
+        edges = [l.strip() for l in code.splitlines() if "-->" in l or "---" in l]
+        self.assertIn("A_3 --> Results_6", edges)
+        self.assertIn("B_4 --> Results_6", edges)
+        self.assertIn("C_5 --> Results_6", edges)
+        self.assertNotIn("Start_1 --> Results_6", edges)
+
     def test_bullet_list_not_diagram(self):
         bullet_text = [
             "Analyze this diagram",
@@ -161,6 +203,15 @@ class TestLayoutHeuristics(unittest.TestCase):
         box_ocr = "1 G\n\n2. |\n\n3 71\n\n4 |\n\n5 LINE\n"
         cleaned = clean_box_text(box_ocr)
         self.assertIn("71", cleaned)
+
+    def test_clean_box_text_preserves_blank_code_lines(self):
+        box_ocr = "5 pass\n\n6\n\n7 class Bus:\n\n8 pass\n\n12\n\n13 class Breaker:"
+        cleaned = clean_box_text(box_ocr)
+        self.assertIn("pass\n\nclass Bus:", cleaned)
+
+    def test_kwargs_block_detected_as_python(self):
+        snippet = 'Transformer (\nname="T1",\nrating_mva=100,\nprimary_kv=13.8,\nZ_pu=@.10\n}'
+        self.assertEqual(estimate_code_language(snippet), "python")
 
     def test_numeric_misread_recovery(self):
         self.assertEqual(recover_numeric_misread("71"), "T1")
@@ -262,6 +313,48 @@ class TestCrossPageContinuation(unittest.TestCase):
         self.assertEqual(rest, boxes)
 
 
+class TestHeadingCues(unittest.TestCase):
+    def test_cue_matches_headings(self):
+        for t in ["Proposed Pipeline",
+                  "Stage 1: Detect \u201cengineering drawings\u201d",
+                  "Stage 2: Vision Model Extraction Once identified, send only the cropped diagram to a multimodal model.",
+                  "Positive Sequence Network",
+                  "Negative Sequence Network",
+                  "Zero Sequence Network",
+                  "What I'd Actually Build"]:
+            self.assertTrue(HEADING_CUE_RE.match(t), t)
+
+    def test_cue_rejects_prose(self):
+        for t in ["The agent can then generate explanations like:",
+                  "I think that's actually the architecture I'd recommend.",
+                  "Stage is a word in a sentence."]:
+            self.assertFalse(HEADING_CUE_RE.match(t), t)
+
+
+class TestCharacterRepair(unittest.TestCase):
+    def test_pipe_before_capitalized_name(self):
+        self.assertEqual(repair_prose_pipe("explanations like: | Transformer T1 is connected"),
+                         "explanations like: I Transformer T1 is connected")
+
+    def test_prose_pipe_to_letter(self):
+        self.assertEqual(repair_prose_pipe("| think that's actually"), "I think that's actually")
+        self.assertEqual(repair_prose_pipe("currents | from propagating"), "currents I from propagating")
+
+    def test_ascii_chain_pipe_preserved(self):
+        self.assertEqual(repair_prose_pipe("G | T1 | LINE | T2 | M"), "G | T1 | LINE | T2 | M")
+        self.assertEqual(repair_prose_pipe("|- delta"), "|- delta")
+        self.assertEqual(repair_prose_pipe("a |-> b"), "a |-> b")
+
+    def test_lone_punct_line_dropped(self):
+        self.assertEqual(repair_code_line_punct(":"), "")
+        self.assertEqual(repair_code_line_punct(";"), "")
+        self.assertEqual(repair_code_line_punct("pass"), "pass")
+        self.assertEqual(repair_code_line_punct("if x:"), "if x:")
+
+    def test_title_prefix_strip(self):
+        import pdf2md as p
+        self.assertEqual(p.strip_title_noise("Cz5IuxVR-electricalDiagramOCR"), "electricalDiagramOCR")
+        self.assertEqual(p.strip_title_noise("electricalDiagramOCR"), "electricalDiagramOCR")
 class TestIndentationReconstruction(unittest.TestCase):
     @staticmethod
     def w(text, left, width, top=100):
@@ -1398,6 +1491,29 @@ class TestSection14Acceptance(unittest.TestCase):
         self.assertEqual(out, md)
         self.assertEqual(err.getvalue().count("unreachable or failed"), 1)
         self.assertIn("prose kept unpolished", err.getvalue())
+
+
+class TestContinuationFenceTag(unittest.TestCase):
+    """Cross-page continuation must track hyphenated fence tags
+    (e.g. ```treeView-beta) and never drop a matched continuation."""
+
+    def test_hyphenated_fence_tag_matched(self):
+        text = "intro\n\n```treeView-beta\nDocling\n└── Extension\n```"
+        fences = list(re.finditer(r"```([\w-]*)\n(.*?)\n```", text, re.DOTALL))
+        self.assertEqual(len(fences), 1)
+        self.assertEqual(fences[0].group(1), "treeView-beta")
+
+    def test_continuation_without_open_fence_is_kept(self):
+        # Mirrors the pdf2md convert() guard: a continuation detected with
+        # no open fence must be re-classified as standalone, not dropped.
+        cont = [((316.0, 575.0, 411, 2129), "5 r- P&ID")]
+        standalone = []
+        open_fence = None
+        if cont and open_fence is None:
+            standalone = cont + standalone
+            cont = []
+        self.assertEqual(cont, [])
+        self.assertEqual(len(standalone), 1)
 
 
 if __name__ == "__main__":
