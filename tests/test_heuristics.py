@@ -195,6 +195,15 @@ class TestLayoutHeuristics(unittest.TestCase):
         cleaned = clean_box_text(box_ocr)
         self.assertIn("71", cleaned)
 
+    def test_clean_box_text_preserves_blank_code_lines(self):
+        box_ocr = "5 pass\n\n6\n\n7 class Bus:\n\n8 pass\n\n12\n\n13 class Breaker:"
+        cleaned = clean_box_text(box_ocr)
+        self.assertIn("pass\n\nclass Bus:", cleaned)
+
+    def test_kwargs_block_detected_as_python(self):
+        snippet = 'Transformer (\nname="T1",\nrating_mva=100,\nprimary_kv=13.8,\nZ_pu=@.10\n}'
+        self.assertEqual(estimate_code_language(snippet), "python")
+
     def test_numeric_misread_recovery(self):
         self.assertEqual(recover_numeric_misread("71"), "T1")
         self.assertEqual(recover_numeric_misread("72"), "T2")
@@ -314,6 +323,10 @@ class TestHeadingCues(unittest.TestCase):
 
 
 class TestCharacterRepair(unittest.TestCase):
+    def test_pipe_before_capitalized_name(self):
+        self.assertEqual(repair_prose_pipe("explanations like: | Transformer T1 is connected"),
+                         "explanations like: I Transformer T1 is connected")
+
     def test_prose_pipe_to_letter(self):
         self.assertEqual(repair_prose_pipe("| think that's actually"), "I think that's actually")
         self.assertEqual(repair_prose_pipe("currents | from propagating"), "currents I from propagating")

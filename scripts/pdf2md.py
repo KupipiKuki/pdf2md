@@ -212,6 +212,12 @@ def estimate_code_language(code):
     if re.search(r"\b[A-Z]\w+\s*\(\s*[\w_]+\s*=\s*", text):
         py_score += 2
 
+    # Multi-line constructor-call block: several bare "key=value," lines
+    # (possibly ending in a '}' misread of the closing paren).
+    kwargs_lines = re.findall(r"^[A-Za-z_][\w]*\s*=\s*[^=]*?,?\s*$", text, re.MULTILINE)
+    if len(kwargs_lines) >= 3 and re.search(r"\b[A-Z]\w+\s*\(", text):
+        return "python"
+
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if py_score >= 1 and not re.search(r"[{};]\s*$", text, re.MULTILINE):
         if py_score >= 2 or any(re.search(r"^\s*(def|class|import|from)\b|^\s*if\s+.*:\s*|^\s*pass\b", l) for l in lines):
@@ -320,9 +326,9 @@ def parse_ascii_diagram_to_mermaid(lines):
 
     # 2. Flowchart and tree markers
     arrow_pattern = re.compile(r"^(\||\bv\b|\bV\b|Vv|▼|↓|\^|--+>|==+>)+$", re.IGNORECASE)
-    branch1_prefix = re.compile(r"^[|\[\]\(\)]*\s*(?:L[-_.]|└┘|\+-)\s*(.*)$")
+    branch1_prefix = re.compile(r"^[|\[\]\(\)]*\s*(?:L[._]|└┘|\+-)\s*(.*)$")
     branch2_prefix = re.compile(
-        r"^[|\[\]\(\)]*\s*(?:\|-|\+-|r[-_.]|├┟|[JjFfIil][eE—–\-])\s*(.*)$"
+        r"^[|\[\]\(\)]*\s*(?:\|-|\+-|L-|r[-_.]|├┟|[JjFfIil][eE—–\-])\s*(.*)$"
     )
     tree_branch_prefix = re.compile(r"^([|\[\]\(\)]*\s*(?:\|-|\+-|L[-_.]|r[-_.]|[├└\u2500-\u257f])\s*)(.*)$")
 
@@ -399,6 +405,9 @@ def parse_ascii_diagram_to_mermaid(lines):
         else:
             prev_has_arrow = (i > 0 and arrow_pattern.match(cleaned_lines[i-1]))
             if prev_has_arrow:
+                converged = len(sibling_run) >= 2 and any(
+                    sib != nid for sib in sibling_run
+                )
                 if len(sibling_run) >= 2:
                     for sib in sibling_run:
                         if sib != nid:
@@ -406,7 +415,7 @@ def parse_ascii_diagram_to_mermaid(lines):
                 sibling_run = []
                 branch1_parent = None
                 parent = current_main_node or last_node
-                if parent and parent != nid:
+                if parent and parent != nid and not converged:
                     edges.append((parent, nid))
                 current_main_node = nid
             else:
@@ -516,7 +525,7 @@ def repair_prose_pipe(text):
     arrow/table syntax are preserved."""
     def _sub(m):
         rest = text[m.end():]
-        if re.match(r"\s*[a-z\u2019']", rest):
+        if re.match(r"\s*(?:[a-z\u2019']|Transformer\b|[A-Z][a-z]+\s+[A-Z])", rest):
             return "I"
         return m.group(0)
     return PROSE_PIPE_RE.sub(_sub, text)
@@ -1023,6 +1032,14 @@ def clean_box_text(text):
                 prev_gutter = gutter
                 continue
             if gutter is None:
+                if (prev_gutter is not None and num == prev_gutter + 1
+                        and prev_gutter < 90):
+                    # A bare number continuing the gutter sequence marks
+                    # a blank line in the original code; preserve it.
+                    prev_gutter = num
+                    if out and out[-1] != "":
+                        out.append("")
+                    continue
                 # A standalone bare-number line is an OCR ghost of a
                 # gutter read for an empty/unread code line; drop it.
                 continue
