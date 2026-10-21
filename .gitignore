@@ -1,2 +1,31 @@
+# Python bytecode & cache
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+
+# Temporary test & benchmark artifacts
+scratch/
+crops/
+
+# Local test scans
+*.pdf
+
+# Python packaging & distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments & local configs
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

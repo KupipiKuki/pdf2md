@@ -1,0 +1,33 @@
+{
+  "description": "Word-box data captured from image_to_data (PSM 6) on a skewed scan of a Python domain-model code box (electricalDiagramOCR.pdf page 4 style). The 0.2-degree scan skew shifts each successive line ~2-4 px to the right; char width ~12 px; gutter digit widths are narrower than code glyphs.",
+  "char_width": 12,
+  "lines": [
+    {"words": [
+      {"text": "1", "left": 38, "top": 64, "width": 9, "height": 22},
+      {"text": "class", "left": 75, "top": 64, "width": 62, "height": 22},
+      {"text": "Generator:", "left": 143, "top": 64, "width": 130, "height": 22}
+    ]},
+    {"words": [
+      {"text": "2", "left": 41, "top": 94, "width": 9, "height": 22},
+      {"text": "pass", "left": 128, "top": 94, "width": 51, "height": 22}
+    ]},
+    {"words": [
+      {"text": "3", "left": 44, "top": 124, "width": 9, "height": 22},
+      {"text": "class", "left": 82, "top": 124, "width": 62, "height": 22},
+      {"text": "Transformer:", "left": 150, "top": 124, "width": 165, "height": 22}
+    ]},
+    {"words": [
+      {"text": "4", "left": 47, "top": 154, "width": 9, "height": 22},
+      {"text": "pass", "left": 134, "top": 154, "width": 51, "height": 22}
+    ]},
+    {"words": [
+      {"text": "5", "left": 50, "top": 184, "width": 9, "height": 22},
+      {"text": "class", "left": 89, "top": 184, "width": 62, "height": 22},
+      {"text": "Bus:", "left": 157, "top": 184, "width": 56, "height": 22}
+    ]},
+    {"words": [
+      {"text": "6", "left": 53, "top": 214, "width": 9, "height": 22},
+      {"text": "pass", "left": 140, "top": 214, "width": 51, "height": 22}
+    ]}
+  ]
+}
