@@ -21,6 +21,8 @@ from pdf2md import (
     clean_block_lines,
     repair_prose_pipe,
     repair_code_line_punct,
+    strip_title_noise,
+    HEADING_CUE_RE,
 )
 
 
@@ -254,6 +256,24 @@ class TestCrossPageContinuation(unittest.TestCase):
         cont, rest = boxes_continuing(None, boxes)
         self.assertEqual(cont, [])
         self.assertEqual(rest, boxes)
+
+
+class TestHeadingCues(unittest.TestCase):
+    def test_cue_matches_headings(self):
+        for t in ["Proposed Pipeline",
+                  "Stage 1: Detect \u201cengineering drawings\u201d",
+                  "Stage 2: Vision Model Extraction Once identified, send only the cropped diagram to a multimodal model.",
+                  "Positive Sequence Network",
+                  "Negative Sequence Network",
+                  "Zero Sequence Network",
+                  "What I'd Actually Build"]:
+            self.assertTrue(HEADING_CUE_RE.match(t), t)
+
+    def test_cue_rejects_prose(self):
+        for t in ["The agent can then generate explanations like:",
+                  "I think that's actually the architecture I'd recommend.",
+                  "Stage is a word in a sentence."]:
+            self.assertFalse(HEADING_CUE_RE.match(t), t)
 
 
 class TestCharacterRepair(unittest.TestCase):

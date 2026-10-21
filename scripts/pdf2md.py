@@ -514,6 +514,13 @@ def repair_prose_pipe(text):
     return PROSE_PIPE_RE.sub(_sub, text)
 
 
+HEADING_CUE_RE = re.compile(
+    r"^(Stage\s+\d+\s*:|Proposed Pipeline$|"
+    r"(?:Positive|Negative|Zero) Sequence Network|"
+    r"What I(?:’|')d Actually Build)"
+)
+
+
 def render_block(block, median_height, max_size):
     """Convert one block of lines into Markdown."""
     block = clean_block_lines(block)
@@ -528,6 +535,13 @@ def render_block(block, median_height, max_size):
 
     texts = [repair_prose_pipe(t) for t in texts]
     text = " ".join(texts).strip()
+
+    if HEADING_CUE_RE.match(texts[0]):
+        head = texts[0]
+        rest = " ".join(texts[1:]).strip()
+        if rest:
+            return f"### {head}\n\n{rest}"
+        return f"### {head}"
 
     is_single = len(block) == 1
     big = first.get("size", 0) >= max_size * 0.98 or first["height"] >= HEADING_HEIGHT_RATIO * median_height
