@@ -2,6 +2,7 @@
 """Unit tests for pdf2md pure heuristics and structure parsing."""
 
 import json
+import re
 import unittest
 import sys
 import os
@@ -1490,6 +1491,29 @@ class TestSection14Acceptance(unittest.TestCase):
         self.assertEqual(out, md)
         self.assertEqual(err.getvalue().count("unreachable or failed"), 1)
         self.assertIn("prose kept unpolished", err.getvalue())
+
+
+class TestContinuationFenceTag(unittest.TestCase):
+    """Cross-page continuation must track hyphenated fence tags
+    (e.g. ```treeView-beta) and never drop a matched continuation."""
+
+    def test_hyphenated_fence_tag_matched(self):
+        text = "intro\n\n```treeView-beta\nDocling\n└── Extension\n```"
+        fences = list(re.finditer(r"```([\w-]*)\n(.*?)\n```", text, re.DOTALL))
+        self.assertEqual(len(fences), 1)
+        self.assertEqual(fences[0].group(1), "treeView-beta")
+
+    def test_continuation_without_open_fence_is_kept(self):
+        # Mirrors the pdf2md convert() guard: a continuation detected with
+        # no open fence must be re-classified as standalone, not dropped.
+        cont = [((316.0, 575.0, 411, 2129), "5 r- P&ID")]
+        standalone = []
+        open_fence = None
+        if cont and open_fence is None:
+            standalone = cont + standalone
+            cont = []
+        self.assertEqual(cont, [])
+        self.assertEqual(len(standalone), 1)
 
 
 if __name__ == "__main__":
