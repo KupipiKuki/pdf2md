@@ -683,6 +683,13 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
             img, all_boxes, crop_paths = process_page_regions(page, dpi, lang, export_crops=export_crops, temp_crops_dir=temp_crops_dir)
             page_h = img.size[1]
             cont, standalone = boxes_continuing(prev_page_state, all_boxes)
+            if cont and open_fence is None:
+                # The continuation detector matched, but no fence was
+                # registered as open (e.g. the page's last fence had a tag
+                # the regex missed). Keep the content as a standalone box
+                # rather than dropping it silently.
+                standalone = cont + standalone
+                cont = []
             if cont and open_fence is not None:
                 tag, buf, fence_part_idx, fence_span = open_fence
                 for _, t in cont:
@@ -763,7 +770,7 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
         if (not used_text_layer and prev_page_state and prev_page_state[2]
                 and text and bottom_continues):
             m = None
-            for m in re.finditer(r"```(\w*)\n(.*?)\n```", text, re.DOTALL):
+            for m in re.finditer(r"```([\w-]*)\n(.*?)\n```", text, re.DOTALL):
                 pass
             if m and m.end() >= len(text) - 4:
                 open_fence = ("", [raw_bottom_text],
