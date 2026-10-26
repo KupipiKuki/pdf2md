@@ -38,6 +38,17 @@ class FigureClassifier:
     PLOT_KEYWORDS = ("axis", "xlabel", "ylabel", "chart", "graph of",
                      "plot of", "curve", "waveform")
 
+    @staticmethod
+    def _kw_re(keywords):
+        # Word-boundary matching: "transformers.py" (file tree) must not
+        # classify as an electrical SLD via the substring "transformer".
+        import re
+        return re.compile(r"\b(" + "|".join(re.escape(k) for k in keywords) + r")\b")
+
+    def __init__(self):
+        self._sld_re = self._kw_re(self.SLD_KEYWORDS)
+        self._pid_re = self._kw_re(self.PID_KEYWORDS)
+
     def classify_text(self, text):
         t = (text or "").lower()
         if not t.strip():
@@ -53,9 +64,9 @@ class FigureClassifier:
             if block.startswith("```treeView-beta"):
                 return "tree_diagram"
             return "flowchart_or_tree"
-        if any(k in t for k in self.PID_KEYWORDS):
+        if self._pid_re.search(t):
             return "piping_and_instrumentation"
-        if any(k in t for k in self.SLD_KEYWORDS):
+        if self._sld_re.search(t):
             return "electrical_sld"
         return "code_listing"
 

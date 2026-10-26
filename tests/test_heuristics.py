@@ -27,7 +27,25 @@ from pdf2md import (
     strip_title_noise,
     HEADING_CUE_RE,
     reconstruct_indented_lines,
+    stack_crop_images,
 )
+
+
+class TestStackCropImages(unittest.TestCase):
+    def test_stacks_vertically_on_white_canvas(self):
+        import tempfile
+        from PIL import Image
+        tmp = tempfile.mkdtemp()
+        p1 = os.path.join(tmp, "a.png")
+        p2 = os.path.join(tmp, "b.png")
+        Image.new("RGB", (20, 10), "red").save(p1)
+        Image.new("RGB", (30, 15), "blue").save(p2)
+        out = stack_crop_images([p1, p2], tmp)
+        with Image.open(out) as im:
+            self.assertEqual(im.size, (30, 25))  # max width, summed height
+            self.assertEqual(im.getpixel((0, 0)), (255, 0, 0))
+            self.assertEqual(im.getpixel((0, 10)), (0, 0, 255))
+            self.assertEqual(im.getpixel((25, 0)), (255, 255, 255))
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from docling_engineering import FigureClassifier, VLMEnricher
@@ -585,6 +603,16 @@ class TestFigureClassifier(unittest.TestCase):
         self.assertEqual(self.clf.mode_for("photograph"), (None, "passthrough"))
         self.assertEqual(self.clf.mode_for("plot_or_chart"), (None, "passthrough"))
 
+    def test_file_tree_not_misrouted_to_sld(self):
+        # "transformers.py" must not match the SLD keyword "transformer":
+        # a source-tree listing is a code_listing, not an electrical SLD.
+        text = "loads/\n  wind.py\n  tension.py\n  transformers.py\n  guys.py"
+        self.assertEqual(self.clf.classify_text(text), "code_listing")
+
+    def test_real_sld_text_still_detected(self):
+        text = "main bus -- breaker -- transformer T1, relay 51G"
+        self.assertEqual(self.clf.classify_text(text), "electrical_sld")
+
 
 class TestVLMEnrichment(unittest.TestCase):
     def test_dryrun_falls_back(self):
@@ -626,13 +654,21 @@ class TestVLMEnrichment(unittest.TestCase):
         self.assertIsNone(postprocess_mode_b("```json\n{}\n```"))
 
     def test_postprocess_mode_c(self):
-        resp = '{"components": [], "connections": []}'
+        resp = ('{"components": [{"id": "G", "type": "generator"}], '
+                '"connections": []}')
         self.assertEqual(postprocess_mode_c(resp),
                          "```json\n" + resp + "\n```")
 
     def test_postprocess_mode_c_rejects_invalid(self):
         self.assertIsNone(postprocess_mode_c("{not json"))
         self.assertIsNone(postprocess_mode_c('{"components": []}'))
+
+    def test_postprocess_mode_c_rejects_empty_topology(self):
+        # A non-SLD crop (e.g. a file tree misrouted by keyword) yields an
+        # empty topology; it must fall back to the deterministic rendering
+        # rather than replace real content with an empty JSON shell.
+        self.assertIsNone(
+            postprocess_mode_c('{"components": [], "connections": []}'))
 
     def test_passthrough_enrich_returns_none(self):
         enricher = VLMEnricher(backend="dryrun")

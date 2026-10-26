@@ -574,6 +574,25 @@ def process_page_regions(page, dpi, lang, export_crops=None, temp_crops_dir=None
     return img, results, crop_paths
 
 
+def stack_crop_images(paths, out_dir, name="continuation_stack.png"):
+    """Stack continuation-box crops vertically into one image so a merged
+    cross-page block can be enriched with a single VLM call."""
+    from PIL import Image
+
+    imgs = [Image.open(p) for p in paths]
+    w = max(im.size[0] for im in imgs)
+    h = sum(im.size[1] for im in imgs)
+    stacked = Image.new("RGB", (w, h), "white")
+    y = 0
+    for im in imgs:
+        stacked.paste(im, (0, y))
+        y += im.size[1]
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, name)
+    stacked.save(out)
+    return out
+
+
 def ocr_masked_page(img, box_results, dpi, lang):
     """OCR the full page with box interiors whited out, returning the
     normal line records for the prose regions."""
@@ -663,6 +682,7 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
     parts = [f"# {title}", ""]
     open_fence = None       # (tag, [lines]) of a fenced block awaiting continuation
     prev_page_state = None  # (box, text, near_bottom, page_h)
+    prev_origin_crop = None  # crop path of prev_page_state's box (for VLM)
 
     for pno, page in enumerate(doc, start=1):
         print(f"Processing page {pno}/{len(doc)}...", file=sys.stderr)
@@ -699,7 +719,25 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
                 # a fresh box: try Mermaid synthesis first, then language
                 # tagging.
                 fence = None
-                if use_mermaid and tag in ("", "mermaid"):
+                if vlm is not None:
+                    # Cross-page continuations get a VLM pass too; the
+                    # continuation crops are stacked so the model sees the
+                    # whole figure in one image.
+                    cont_crops = ([prev_origin_crop] if prev_origin_crop else []) \
+                        + [crop_paths.get(b) for b, _ in cont]
+                    cont_crops = [c for c in cont_crops if c and os.path.isfile(c)]
+                    if cont_crops:
+                        img_path = cont_crops[0]
+                        if len(cont_crops) > 1:
+                            try:
+                                img_path = stack_crop_images(
+                                    cont_crops,
+                                    temp_crops_dir or export_crops
+                                    or tempfile.gettempdir())
+                            except Exception:
+                                img_path = cont_crops[0]
+                        fence = vlm.enrich(merged, img_path) or None
+                if fence is None and use_mermaid and tag in ("", "mermaid"):
                     is_diag, diagram_block = parse_ascii_diagram_block(merged.splitlines())
                     if is_diag:
                         fence = diagram_block
@@ -749,10 +787,13 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
                 raw_bottom_text = clean_box_text(bottom[1])
                 prev_page_state = (bottom[0], bottom[1],
                                    bottom_continues, page_h)
+                prev_origin_crop = crop_paths.get(bottom[0])
             else:
                 prev_page_state = None
+                prev_origin_crop = None
         else:
             prev_page_state = None
+            prev_origin_crop = None
             text = page_to_markdown(lines, use_mermaid=use_mermaid)
 
         src = ("text layer" if used_text_layer

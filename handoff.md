@@ -1256,3 +1256,74 @@ even if `vlm_backend == polish_backend` (e.g. using `gemini-2.5-flash` for both 
 3. Unit: `pdf2md` with `--vlm M --polish M` does NOT prompt to pause; with `--vlm A --polish B` it DOES prompt.
 4. Unit: All 102 tests pass with 0 `ResourceWarning` notices.
 
+
+---
+
+## 15. Local-Server VLM Pass on New Reference Document (Python_Power_Systems_Review_20261025_0001.pdf)
+
+First full VLM-enriched conversion of a new 11-page scan, run entirely against a
+local llama.cpp model-router server (`http://localhost:9931/v1`) — no cloud API.
+
+### 15.1 Environment
+
+- **Server:** llama.cpp router on port 9931; models load on demand (measured:
+  Qwen3-VL-8B ~22 s, Qwen2.5-14B ~50 s).
+- **Backends used:** `openai:unsloth/Qwen3-VL-8B-Instruct-1M-GGUF:Q8_0@http://localhost:9931/v1`
+  (`--vlm`), `openai:RichardErkhov/unsloth_-_Qwen2.5-14B-Instruct-gguf:Q4_K_M@http://localhost:9931/v1`
+  (`--polish`, non-thinking instruct model chosen deliberately).
+- **Artifacts:** `scratch/python_review/` (baseline md, crops/, run logs,
+  `python_review_final3.md` final output).
+
+### 15.2 Defects found by live probing (probe scripts in scratch/python_review/)
+
+1. **Mode C empty-topology content loss.** The `loads/` file tree matched SLD
+   keyword `transformer` via `transformers.py`, routed to `sld_topology`,
+   and the model's (correct) `{"components": [], "connections": []}` was
+   ACCEPTED as an override, deleting the tree from the output.
+2. **SLD keyword substring matching.** Any text containing `transformer`,
+   `bus`, `relay`, `ansi` as a substring misclassified as `electrical_sld`.
+3. **Cross-page continuations bypassed VLM.** Merged continuation blocks were
+   re-rendered deterministically; the standards/ tree (p2->3) stayed garbled.
+4. **Mode B gutter-number pollution.** Scans number tree lines in the margin;
+   the VLM used them as node IDs (`2 --> 3[nesc/]`).
+5. **60 s backend timeout vs. ~50 s model swaps** on a single-GPU router.
+
+### 15.3 Fixes applied (all test-covered, suite 128 green + smoke)
+
+1. `postprocess_mode_c` rejects empty components+connections (falls back to
+   deterministic render). Test `test_postprocess_mode_c_rejects_empty_topology`
+   replaces the old assertion that empty was valid.
+2. Classifier SLD/P&ID keywords now word-boundary regexes
+   (`FigureClassifier.__init__` compiles `_sld_re`/`_pid_re`).
+   Tests: file tree not misrouted; real SLD text still detected.
+3. `pdf2md.convert` routes merged continuation blocks through `vlm.enrich`
+   using a vertically stacked composite of the ORIGIN box crop + continuation
+   crops (`stack_crop_images`, origin path carried in `prev_origin_crop`).
+   First attempt stacked only continuation crops and silently dropped the
+   origin half of two boxes; caught in review and fixed before merge.
+4. Mode B prompt: margin/gutter numbers must be ignored as node IDs/labels.
+5. `OpenAICompatBackend.TIMEOUT_SECONDS` overridable via `PDF2MD_VLM_TIMEOUT`.
+
+### 15.4 Results (deterministic -> final)
+
+- `pole class` -> `pole_class`; `C3` -> `C**3`; `Heavyi}` -> `HeavyIce`;
+  `PostGIs` -> `PostGIS`; broken formula lines reassembled; language tags on
+  all fenced blocks; `loads/` tree recovered with box-drawing glyphs;
+  standards/ tree is now a complete, correct mermaid hierarchy
+  (root + 4 subtrees + 7 files, `1724E200/1724E204` read correctly).
+- Polish pass: conservative by design (2 polished / 5 unchanged /
+  16 line-drift-rejected); introduced one minor artifact
+  (`I Pole Review Agent Input:`).
+
+### 15.5 Known remaining gaps (roadmap)
+
+1. **Unboxed regions never reach the VLM** (root cause of all remaining
+   defects): page-3 JSON metadata (unclosed fence, curly quote), page-5
+   run-on code line + gutter leaks (`| 1 deflectionFactor`), page-9 folder
+   tree garble, page-10 tree fragments misrendered as `##` headings.
+   Next iteration: propose synthetic crops from unboxed code/tree-like prose
+   line clusters and route them through the same enrich path.
+2. Mermaid node-ID styling from Mode B (`standards[/]`, bare `2023.json`
+   IDs) is valid-but-ugly; prompt should request quoted `A["label"]` form.
+3. Polish line-drift guard rejects most repairs; consider fuzzy line
+   alignment so repairs with reflowed whitespace can be accepted.
