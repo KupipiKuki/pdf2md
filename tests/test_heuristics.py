@@ -2,6 +2,7 @@
 """Unit tests for pdf2md pure heuristics and structure parsing."""
 
 import json
+import re
 import unittest
 import sys
 import os
@@ -21,8 +22,31 @@ from pdf2md import (
     looks_like_list,
     looks_like_code,
     clean_block_lines,
+    repair_prose_pipe,
+    repair_code_line_punct,
+    strip_title_noise,
+    HEADING_CUE_RE,
     reconstruct_indented_lines,
+    stack_crop_images,
+    find_unboxed_code_clusters,
 )
+
+
+class TestStackCropImages(unittest.TestCase):
+    def test_stacks_vertically_on_white_canvas(self):
+        import tempfile
+        from PIL import Image
+        tmp = tempfile.mkdtemp()
+        p1 = os.path.join(tmp, "a.png")
+        p2 = os.path.join(tmp, "b.png")
+        Image.new("RGB", (20, 10), "red").save(p1)
+        Image.new("RGB", (30, 15), "blue").save(p2)
+        out = stack_crop_images([p1, p2], tmp)
+        with Image.open(out) as im:
+            self.assertEqual(im.size, (30, 25))  # max width, summed height
+            self.assertEqual(im.getpixel((0, 0)), (255, 0, 0))
+            self.assertEqual(im.getpixel((0, 10)), (0, 0, 255))
+            self.assertEqual(im.getpixel((25, 0)), (255, 255, 255))
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from docling_engineering import FigureClassifier, VLMEnricher
@@ -131,6 +155,43 @@ class TestMermaidDiagramConversion(unittest.TestCase):
         ok2, _ = parse_ascii_diagram_to_mermaid(not_chain)
         self.assertFalse(ok2)
 
+    def test_tree_marker_depth_not_keywords(self):
+        # Branch parents come from marker depth (L_ vs |-), not from
+        # keyword matching on labels.
+        tree = [
+            "Docling",
+            "L_ EngineeringFigureExtension",
+            "|- Electrical SLD",
+            "|- Protection Scheme",
+            "Je Civil Drawing",
+            "r- P&ID",
+            "|- Mechanical Assembly",
+            "|- Control Narrative",
+        ]
+        ok, code = parse_ascii_diagram_to_mermaid(tree)
+        self.assertTrue(ok)
+        edges = [l.strip() for l in code.splitlines() if "-->" in l or "---" in l]
+        self.assertIn("EngineeringF_2 --> ElectricalSL_3", edges)
+        self.assertIn("EngineeringF_2 --> CivilDrawing_5", edges)
+        self.assertIn("EngineeringF_2 --> PID_6", edges)
+        self.assertIn("EngineeringF_2 --> MechanicalAs_7", edges)
+        self.assertIn("EngineeringF_2 --> ControlNarra_8", edges)
+        self.assertNotIn("ProtectionSc_4 --> PID_6", edges)
+        self.assertNotIn("Docling_1 --> CivilDrawing_5", edges)
+
+    def test_sibling_fan_in_converges_to_next_trunk(self):
+        # >=2 sibling branches followed by a trunk node: all siblings
+        # converge into that node (fan-in), and the chain skips the
+        # redundant parent->trunk edge.
+        diag = ["Start", "L_ Group", "|- A", "|- B", "|- C", "Results"]
+        ok, code = parse_ascii_diagram_to_mermaid(diag)
+        self.assertTrue(ok)
+        edges = [l.strip() for l in code.splitlines() if "-->" in l or "---" in l]
+        self.assertIn("A_3 --> Results_6", edges)
+        self.assertIn("B_4 --> Results_6", edges)
+        self.assertIn("C_5 --> Results_6", edges)
+        self.assertNotIn("Start_1 --> Results_6", edges)
+
     def test_bullet_list_not_diagram(self):
         bullet_text = [
             "Analyze this diagram",
@@ -161,6 +222,15 @@ class TestLayoutHeuristics(unittest.TestCase):
         box_ocr = "1 G\n\n2. |\n\n3 71\n\n4 |\n\n5 LINE\n"
         cleaned = clean_box_text(box_ocr)
         self.assertIn("71", cleaned)
+
+    def test_clean_box_text_preserves_blank_code_lines(self):
+        box_ocr = "5 pass\n\n6\n\n7 class Bus:\n\n8 pass\n\n12\n\n13 class Breaker:"
+        cleaned = clean_box_text(box_ocr)
+        self.assertIn("pass\n\nclass Bus:", cleaned)
+
+    def test_kwargs_block_detected_as_python(self):
+        snippet = 'Transformer (\nname="T1",\nrating_mva=100,\nprimary_kv=13.8,\nZ_pu=@.10\n}'
+        self.assertEqual(estimate_code_language(snippet), "python")
 
     def test_numeric_misread_recovery(self):
         self.assertEqual(recover_numeric_misread("71"), "T1")
@@ -262,6 +332,48 @@ class TestCrossPageContinuation(unittest.TestCase):
         self.assertEqual(rest, boxes)
 
 
+class TestHeadingCues(unittest.TestCase):
+    def test_cue_matches_headings(self):
+        for t in ["Proposed Pipeline",
+                  "Stage 1: Detect \u201cengineering drawings\u201d",
+                  "Stage 2: Vision Model Extraction Once identified, send only the cropped diagram to a multimodal model.",
+                  "Positive Sequence Network",
+                  "Negative Sequence Network",
+                  "Zero Sequence Network",
+                  "What I'd Actually Build"]:
+            self.assertTrue(HEADING_CUE_RE.match(t), t)
+
+    def test_cue_rejects_prose(self):
+        for t in ["The agent can then generate explanations like:",
+                  "I think that's actually the architecture I'd recommend.",
+                  "Stage is a word in a sentence."]:
+            self.assertFalse(HEADING_CUE_RE.match(t), t)
+
+
+class TestCharacterRepair(unittest.TestCase):
+    def test_pipe_before_capitalized_name(self):
+        self.assertEqual(repair_prose_pipe("explanations like: | Transformer T1 is connected"),
+                         "explanations like: I Transformer T1 is connected")
+
+    def test_prose_pipe_to_letter(self):
+        self.assertEqual(repair_prose_pipe("| think that's actually"), "I think that's actually")
+        self.assertEqual(repair_prose_pipe("currents | from propagating"), "currents I from propagating")
+
+    def test_ascii_chain_pipe_preserved(self):
+        self.assertEqual(repair_prose_pipe("G | T1 | LINE | T2 | M"), "G | T1 | LINE | T2 | M")
+        self.assertEqual(repair_prose_pipe("|- delta"), "|- delta")
+        self.assertEqual(repair_prose_pipe("a |-> b"), "a |-> b")
+
+    def test_lone_punct_line_dropped(self):
+        self.assertEqual(repair_code_line_punct(":"), "")
+        self.assertEqual(repair_code_line_punct(";"), "")
+        self.assertEqual(repair_code_line_punct("pass"), "pass")
+        self.assertEqual(repair_code_line_punct("if x:"), "if x:")
+
+    def test_title_prefix_strip(self):
+        import pdf2md as p
+        self.assertEqual(p.strip_title_noise("Cz5IuxVR-electricalDiagramOCR"), "electricalDiagramOCR")
+        self.assertEqual(p.strip_title_noise("electricalDiagramOCR"), "electricalDiagramOCR")
 class TestIndentationReconstruction(unittest.TestCase):
     @staticmethod
     def w(text, left, width, top=100):
@@ -492,6 +604,16 @@ class TestFigureClassifier(unittest.TestCase):
         self.assertEqual(self.clf.mode_for("photograph"), (None, "passthrough"))
         self.assertEqual(self.clf.mode_for("plot_or_chart"), (None, "passthrough"))
 
+    def test_file_tree_not_misrouted_to_sld(self):
+        # "transformers.py" must not match the SLD keyword "transformer":
+        # a source-tree listing is a code_listing, not an electrical SLD.
+        text = "loads/\n  wind.py\n  tension.py\n  transformers.py\n  guys.py"
+        self.assertEqual(self.clf.classify_text(text), "code_listing")
+
+    def test_real_sld_text_still_detected(self):
+        text = "main bus -- breaker -- transformer T1, relay 51G"
+        self.assertEqual(self.clf.classify_text(text), "electrical_sld")
+
 
 class TestVLMEnrichment(unittest.TestCase):
     def test_dryrun_falls_back(self):
@@ -533,13 +655,21 @@ class TestVLMEnrichment(unittest.TestCase):
         self.assertIsNone(postprocess_mode_b("```json\n{}\n```"))
 
     def test_postprocess_mode_c(self):
-        resp = '{"components": [], "connections": []}'
+        resp = ('{"components": [{"id": "G", "type": "generator"}], '
+                '"connections": []}')
         self.assertEqual(postprocess_mode_c(resp),
                          "```json\n" + resp + "\n```")
 
     def test_postprocess_mode_c_rejects_invalid(self):
         self.assertIsNone(postprocess_mode_c("{not json"))
         self.assertIsNone(postprocess_mode_c('{"components": []}'))
+
+    def test_postprocess_mode_c_rejects_empty_topology(self):
+        # A non-SLD crop (e.g. a file tree misrouted by keyword) yields an
+        # empty topology; it must fall back to the deterministic rendering
+        # rather than replace real content with an empty JSON shell.
+        self.assertIsNone(
+            postprocess_mode_c('{"components": [], "connections": []}'))
 
     def test_passthrough_enrich_returns_none(self):
         enricher = VLMEnricher(backend="dryrun")
@@ -1398,6 +1528,149 @@ class TestSection14Acceptance(unittest.TestCase):
         self.assertEqual(out, md)
         self.assertEqual(err.getvalue().count("unreachable or failed"), 1)
         self.assertIn("prose kept unpolished", err.getvalue())
+
+
+class TestContinuationFenceTag(unittest.TestCase):
+    """Cross-page continuation must track hyphenated fence tags
+    (e.g. ```treeView-beta) and never drop a matched continuation."""
+
+    def test_hyphenated_fence_tag_matched(self):
+        text = "intro\n\n```treeView-beta\nDocling\n└── Extension\n```"
+        fences = list(re.finditer(r"```([\w-]*)\n(.*?)\n```", text, re.DOTALL))
+        self.assertEqual(len(fences), 1)
+        self.assertEqual(fences[0].group(1), "treeView-beta")
+
+    def test_continuation_without_open_fence_is_kept(self):
+        # Mirrors the pdf2md convert() guard: a continuation detected with
+        # no open fence must be re-classified as standalone, not dropped.
+        cont = [((316.0, 575.0, 411, 2129), "5 r- P&ID")]
+        standalone = []
+        open_fence = None
+        if cont and open_fence is None:
+            standalone = cont + standalone
+            cont = []
+        self.assertEqual(cont, [])
+        self.assertEqual(len(standalone), 1)
+
+
+
+
+class TestSection15Roadmap(unittest.TestCase):
+    """Handoff 15.5 roadmap: Mode B node-ID form, polish fuzzy
+    alignment, and unboxed-cluster detection."""
+
+    def test_mode_b_prompt_requests_quoted_label_form(self):
+        from docling_engineering.prompts import PROMPT_DIAGRAM_TO_MERMAID
+        self.assertIn('A["Label"]', PROMPT_DIAGRAM_TO_MERMAID)
+        self.assertIn("Never use a bare label", PROMPT_DIAGRAM_TO_MERMAID)
+
+    def test_polish_accepts_char_repair_with_reflow(self):
+        from docling_engineering.polish import polish_markdown
+
+        class RepairReflowLLM:
+            def complete_text(self, text):
+                # Character repair AND a reflowed line split
+                return text.replace("| think", "I think").replace(
+                    "layered design", "layered\ndesign")
+
+        md = ("Given the audit | think the recommended architecture "
+              "is a layered design over time.\n")
+        out = polish_markdown(md, RepairReflowLLM())
+        self.assertIn("I think the recommended architecture is a layered", out)
+        self.assertNotIn("| think", out)
+
+    def test_polish_accepts_whitespace_reflow(self):
+        from docling_engineering.polish import polish_markdown
+
+        class ReflowLLM:
+            def complete_text(self, text):
+                # Model split the long line into two; words unchanged
+                return text.replace(
+                    "the recommended architecture is a layered design",
+                    "the recommended architecture is\na layered design")
+
+        md = "Given the audit, the recommended architecture is a layered design.\n"
+        out = polish_markdown(md, ReflowLLM())
+        self.assertIn("a layered design", out)
+
+    def test_polish_accepts_reordered_whitespace_only(self):
+        from docling_engineering.polish import polish_markdown, _lines_align
+        self.assertTrue(_lines_align(
+            ["alpha beta gamma"], ["alpha  beta", "gamma"]))
+        self.assertFalse(_lines_align(
+            ["alpha beta gamma"], ["alpha", "totally different content"]))
+        self.assertFalse(_lines_align(
+            ["alpha", "beta"], ["alpha", "beta", "invented line"]))
+
+    def test_polish_still_rejects_invented_lines(self):
+        from docling_engineering.polish import polish_markdown
+
+        class InventLLM:
+            def complete_text(self, text):
+                return text + "\nEntirely new sentence the model invented."
+
+        md = "| think this is prose long enough to be polished by the guard.\n"
+        out = polish_markdown(md, InventLLM())
+        self.assertIn("| think this is prose", out)
+
+    def test_find_unboxed_code_clusters_detects_code(self):
+        from PIL import Image
+        import numpy as np
+        img = Image.new("L", (400, 200), 255)
+        arr = np.array(img)
+        # Paint text-like dark pixels for the cluster rows
+        for y in (20, 40, 60):
+            arr[y, 50:300] = 0
+        img = Image.fromarray(arr)
+        lines = [
+            {"text": '1 pole = {"id": "P1"}', "top": 15, "bottom": 25,
+             "height": 10, "left": 50},
+            {"text": "2 span = get_span( )", "top": 35, "bottom": 45,
+             "height": 10, "left": 50},
+            {"text": "3 if span > 0:", "top": 55, "bottom": 65,
+             "height": 10, "left": 50},
+        ]
+        clusters = find_unboxed_code_clusters(img, lines, all_boxes=[])
+        self.assertEqual(len(clusters), 1)
+        (box, text) = clusters[0]
+        self.assertIn('pole = {"id": "P1"}', text)
+        y0, y1, x0, x1 = box
+        self.assertLess(y0, 15)
+        self.assertGreater(y1, 65)
+        self.assertLess(x0, 50)
+        self.assertGreater(x1, 300)
+
+    def test_find_unboxed_code_clusters_ignores_prose(self):
+        from PIL import Image
+        img = Image.new("L", (400, 200), 255)
+        lines = [
+            {"text": "This is a prose paragraph about poles and wires.",
+             "top": 15, "bottom": 25, "height": 10, "left": 50},
+            {"text": "It continues with more narrative sentence text here.",
+             "top": 35, "bottom": 45, "height": 10, "left": 50},
+            {"text": "And finishes with a third line of ordinary prose.",
+             "top": 55, "bottom": 65, "height": 10, "left": 50},
+        ]
+        self.assertEqual(find_unboxed_code_clusters(img, lines, []), [])
+
+    def test_find_unboxed_code_clusters_skips_inside_boxes(self):
+        from PIL import Image
+        import numpy as np
+        arr = np.full((200, 400), 255, dtype=np.uint8)
+        for y in (20, 40, 60):
+            arr[y, 50:300] = 0
+        img = Image.fromarray(arr)
+        lines = [
+            {"text": '1 d = {"a": 1}', "top": 15, "bottom": 25, "height": 10,
+             "left": 50},
+            {"text": "2 x = [d[\"a\"]", "top": 35, "bottom": 45, "height": 10,
+             "left": 50},
+            {"text": "3 if x > 0:", "top": 55, "bottom": 65, "height": 10,
+             "left": 50},
+        ]
+        # A bordered box covers the same y-range: cluster must be skipped
+        boxes = [(10, 70, 40, 310)]
+        self.assertEqual(find_unboxed_code_clusters(img, lines, boxes), [])
 
 
 if __name__ == "__main__":

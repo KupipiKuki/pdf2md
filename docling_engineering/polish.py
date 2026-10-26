@@ -13,6 +13,7 @@ Backend reuse: the Section 11 `build_backend` table. `granite` and
 an instruction-following LLM; dryrun has no model at all).
 """
 
+import difflib
 import os
 import re
 import sys
@@ -59,6 +60,57 @@ def split_prose_and_fences(markdown):
     if pos < len(markdown):
         segments.append(("prose", markdown[pos:]))
     return segments
+
+
+def _normalize_line(ln):
+    """Collapse all whitespace so reflowed text compares by content."""
+    return re.sub(r"\s+", " ", ln.strip()).lower()
+
+
+def _lines_align(original_lines, new_lines):
+    """Fuzzy line alignment for the polish drift guard (handoff 15.5-3).
+
+    A response with a different line count is accepted only when every
+    original line has a distinct new line with near-identical normalized
+    content (same words after whitespace collapse). This admits repairs
+    that reflow whitespace (e.g. a single long line the model split, or
+    trailing blank-line noise stripped) while still rejecting invented,
+    deleted, or reordered structure.
+    """
+    if not original_lines or not new_lines:
+        return False
+    # Pure reflow: same words in the same order, only the line wrapping
+    # changed (model split a long line or merged a short one).
+    if (_normalize_line(" ".join(original_lines))
+            == _normalize_line(" ".join(new_lines))):
+        return True
+    # Character repairs with reflow: same number of words, joined text
+    # near-identical (the only edits are single-character misread fixes
+    # such as '|' -> 'I', wrapped differently across lines).
+    o_words = _normalize_line(" ".join(original_lines)).split()
+    n_words = _normalize_line(" ".join(new_lines)).split()
+    if (len(o_words) == len(n_words)
+            and difflib.SequenceMatcher(
+                None, " ".join(o_words), " ".join(n_words)).ratio() >= 0.9):
+        return True
+    remaining = list(new_lines)
+    for o in original_lines:
+        no = _normalize_line(o)
+        match = None
+        for j, n in enumerate(remaining):
+            if _normalize_line(n) == no:
+                match = j
+                break
+        if match is None:
+            for j, n in enumerate(remaining):
+                if difflib.SequenceMatcher(
+                        None, no, _normalize_line(n)).ratio() >= 0.9:
+                    match = j
+                    break
+        if match is None:
+            return False
+        remaining.pop(match)
+    return not remaining
 
 
 def polish_markdown(markdown, backend, min_chars=20):
@@ -110,7 +162,8 @@ def polish_markdown(markdown, backend, min_chars=20):
             stats["empty"] += 1
             out.append(text)
             continue
-        if len(new_lines) != len(original_lines):
+        if len(new_lines) != len(original_lines) and not _lines_align(
+                original_lines, new_lines):
             _dbg(f"segment {i}: line drift "
                  f"({len(original_lines)} -> {len(new_lines)} lines) -> kept original")
             stats["drift"] += 1

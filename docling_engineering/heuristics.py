@@ -79,6 +79,12 @@ def estimate_code_language(code):
     if re.search(r"\b[A-Z]\w+\s*\(\s*[\w_]+\s*=\s*", text):
         py_score += 2
 
+    # Multi-line constructor-call block: several bare "key=value," lines
+    # (possibly ending in a '}' misread of the closing paren).
+    kwargs_lines = re.findall(r"^[A-Za-z_][\w]*\s*=\s*[^=]*?,?\s*$", text, re.MULTILINE)
+    if len(kwargs_lines) >= 3 and re.search(r"\b[A-Z]\w+\s*\(", text):
+        return "python"
+
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if py_score >= 1 and not re.search(r"[{};]\s*$", text, re.MULTILINE):
         if py_score >= 2 or any(re.search(r"^\s*(def|class|import|from)\b|^\s*if\s+.*:\s*|^\s*pass\b", l) for l in lines):
@@ -183,8 +189,16 @@ def parse_ascii_diagram_to_mermaid(lines):
                 return True, "flowchart LR\n    " + " --> ".join(node_defs)
 
     # 2. Flowchart and tree markers
-    arrow_pattern = re.compile(r"^(\||\bv\b|\bV\b|Vv|▼|↓|\^|--+>|==+>)+$", re.IGNORECASE)
-    tree_branch_prefix = re.compile(r"^([|\[\]\(\)]*\s*(?:\|-|\+-|L[-_.]|r[-_.]|[├└\u2500-\u257f])\s*)(.*)$")
+    arrow_pattern = re.compile(r"^(\||\bv\b|\bV\b|Vv|▼↓|\^|--+>|==+>)+$", re.IGNORECASE)
+    # Level-1 branch markers attach to the trunk; level-2 markers are
+    # siblings under the most recent level-1 branch. OCR calibrates:
+    # L_ / L. are level 1; |-, L-, r-, and mangled "Je"-style prefixes
+    # are level 2.
+    branch1_prefix = re.compile(r"^[|\[\]\(\)]*\s*(?:L[._]|└┘|\+-)\s*(.*)$")
+    branch2_prefix = re.compile(
+        r"^[|\[\]\(\)]*\s*(?:\|-|\+-|L-|r[-_.]|├┟|[JjFfIil][eE—–\-])\s*(.*)$"
+    )
+    tree_branch_prefix = re.compile(r"^([|\[\]\(\)]*\s*(?:\|-|\+-|L[-_.]|r[-_.]|[├└─-\u257f])\s*)(.*)$")
 
     arrow_lines = 0
     tree_lines = 0
@@ -225,8 +239,8 @@ def parse_ascii_diagram_to_mermaid(lines):
 
     current_main_node = None
     last_node = None
-    current_tree_parent = None
-    sub_parent = None
+    branch1_parent = None
+    sibling_run = []
 
     i = 0
     n = len(cleaned_lines)
@@ -236,9 +250,8 @@ def parse_ascii_diagram_to_mermaid(lines):
             i += 1
             continue
 
-        m_tree = tree_branch_prefix.match(raw)
-        is_tree_branch = bool(m_tree or raw.startswith("| ") or raw.startswith("|-") or raw.startswith("L-") or raw.startswith("L_"))
-
+        m1 = branch1_prefix.match(raw)
+        m2 = bool(branch2_prefix.match(raw) or raw.startswith("| ") or raw.startswith("|-"))
         lbl = recover_numeric_misread(clean_label(raw))
         if not lbl:
             i += 1
@@ -247,41 +260,49 @@ def parse_ascii_diagram_to_mermaid(lines):
         nid = make_id(lbl)
         nodes.append((nid, lbl))
 
-        if is_tree_branch:
-            prefix = m_tree.group(1) if m_tree else raw
-            if ("L_" in prefix or "L." in prefix or "L-" in prefix or "└" in prefix) and sub_parent:
-                edges.append((sub_parent, nid))
-                sub_parent = None
+        if m1 or m2:
+            if m1:
+                sibling_run = []
+                parent = current_main_node or last_node
+                branch1_parent = nid
             else:
-                parent = current_tree_parent or current_main_node or last_node
-                if parent and parent != nid:
-                    edges.append((parent, nid))
-
-                lbl_lower = lbl.lower()
-                if any(w in lbl_lower for w in ["detector", "extension", "drawing", "scheme"]):
-                    current_tree_parent = nid
-                elif any(w in lbl_lower for w in ["text", "tables", "sld"]):
-                    if "route here" in lbl_lower or "&lt;--" in lbl or "<--" in lbl:
-                        current_main_node = nid
-                    else:
-                        sub_parent = nid
+                parent = branch1_parent or current_main_node or last_node
+                sibling_run.append(nid)
+            if parent and parent != nid:
+                edges.append((parent, nid))
         else:
             prev_has_arrow = (i > 0 and arrow_pattern.match(cleaned_lines[i-1]))
             if prev_has_arrow:
+                converged = len(sibling_run) >= 2 and any(
+                    sib != nid for sib in sibling_run
+                )
+                if len(sibling_run) >= 2:
+                    for sib in sibling_run:
+                        if sib != nid:
+                            edges.append((sib, nid))
+                sibling_run = []
+                branch1_parent = None
                 parent = current_main_node or last_node
-                if parent and parent != nid:
+                if parent and parent != nid and not converged:
                     edges.append((parent, nid))
                 current_main_node = nid
-                current_tree_parent = None
-                sub_parent = None
             else:
                 if not current_main_node:
                     current_main_node = nid
                 else:
+                    converged = len(sibling_run) >= 2 and any(
+                        sib != nid for sib in sibling_run
+                    )
+                    if len(sibling_run) >= 2:
+                        for sib in sibling_run:
+                            if sib != nid:
+                                edges.append((sib, nid))
                     parent = current_main_node
-                    if parent != nid:
+                    if parent != nid and not converged:
                         edges.append((parent, nid))
                     current_tree_parent = nid
+                sibling_run = []
+                branch1_parent = None
         last_node = nid
         i += 1
 
@@ -500,6 +521,30 @@ def clean_block_lines(block):
     return filtered
 
 
+PROSE_PIPE_RE = re.compile(
+    r"(?<![\w\"'>(/\\])\|(?![\w\"'</)\\]|\s*[-=]>|\s*\})"
+)
+
+HEADING_CUE_RE = re.compile(
+    r"^(Stage\s+\d+\s*:|Proposed Pipeline$|"
+    r"(?:Positive|Negative|Zero) Sequence Network|"
+    r"What I(?:’|')d Actually Build)"
+)
+
+
+def repair_prose_pipe(text):
+    """Repair OCR pipe/I confusion in prose: a standalone '|' that is
+    followed by a lowercase word or a capitalized name (where a pronoun
+    'I' fits, not a chain node label) is a misread 'I'. Chain separators
+    like 'G | T1' and arrow/table syntax are preserved."""
+    def _sub(m):
+        rest = text[m.end():]
+        if re.match(r"\s*(?:[a-z’']|Transformer\b|[A-Z][a-z]+\s+[A-Z])", rest):
+            return "I"
+        return m.group(0)
+    return PROSE_PIPE_RE.sub(_sub, text)
+
+
 def render_block(block, median_height, max_size):
     """Convert one block of lines into Markdown."""
     block = clean_block_lines(block)
@@ -511,6 +556,16 @@ def render_block(block, median_height, max_size):
 
     if not text:
         return None
+
+    texts = [repair_prose_pipe(t) for t in texts]
+    text = " ".join(texts).strip()
+
+    if HEADING_CUE_RE.match(texts[0]):
+        head = texts[0]
+        rest = " ".join(texts[1:]).strip()
+        if rest:
+            return f"### {head}\n\n{rest}"
+        return f"### {head}"
 
     is_single = len(block) == 1
     big = first.get("size", 0) >= max_size * 0.98 or first["height"] >= HEADING_HEIGHT_RATIO * median_height
@@ -736,6 +791,16 @@ def clean_box_text(text):
                 prev_gutter = gutter
                 continue
             if gutter is None:
+                if (prev_gutter is not None and num == prev_gutter + 1
+                        and prev_gutter < 90):
+                    # A bare number continuing the gutter sequence marks
+                    # a blank line in the original code; preserve it.
+                    prev_gutter = num
+                    if out and out[-1] != "":
+                        out.append("")
+                    continue
+                # A standalone bare-number line is an OCR ghost of a
+                # gutter read for an empty/unread code line; drop it.
                 continue
         if gutter is not None:
             prev_gutter = gutter
@@ -758,8 +823,27 @@ def clean_box_text(text):
             if re.search(r"[})\]]$", stem):
                 line = stem.rstrip()
         if line:
+            line = repair_code_line_punct(line)
+        if line:
             out.append(line)
     return "\n".join(out)
+
+
+LONE_PUNCT_LINE_RE = re.compile(r"^[;:]$")
+
+
+def repair_code_line_punct(line):
+    """Drop OCR-noise code lines that consist of a lone ';' or ':': they
+    have no structural meaning on their own in a fenced block."""
+    if LONE_PUNCT_LINE_RE.fullmatch(line):
+        return ""
+    return line
+
+
+def strip_title_noise(title):
+    """Remove random run-ID prefixes OCR or tooling glued onto the file
+    stem, e.g. 'Cz5IuxVR-electricalDiagramOCR' -> 'electricalDiagramOCR'."""
+    return re.sub(r"^[A-Za-z0-9]{7,}[-_]", "", title, count=1)
 
 
 def render_box_cleaned(cleaned, use_mermaid=True):

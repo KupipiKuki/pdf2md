@@ -48,7 +48,9 @@ class OpenAICompatBackend:
     urllib.request (zero extra dependencies).
     """
 
-    TIMEOUT_SECONDS = 60
+    # Model-swapping local servers (llama.cpp router, LM Studio) can take
+    # 30-60s to load a model on the first request; allow overriding via env.
+    TIMEOUT_SECONDS = int(os.environ.get("PDF2MD_VLM_TIMEOUT", "60"))
 
     URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d+)?(/.*)?$")
 
@@ -413,6 +415,11 @@ def postprocess_mode_c(response):
         return None
     if not (isinstance(topology, dict) and "components" in topology
             and "connections" in topology):
+        return None
+    # An empty topology means the crop was not actually an SLD: reject it
+    # so the caller falls back to the deterministic rendering instead of
+    # replacing real content with an empty JSON shell.
+    if not topology["components"] and not topology["connections"]:
         return None
     return "```json\n" + code + "\n```"
 

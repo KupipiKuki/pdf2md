@@ -172,6 +172,10 @@ from docling_engineering.heuristics import (
     render_box_cleaned,
     box_gutter_range,
     boxes_continuing,
+    strip_title_noise,
+    repair_prose_pipe,
+    repair_code_line_punct,
+    HEADING_CUE_RE,
     GUTTER_RE,
     BULLET_RE,
     BULLET_WORD_RE,
@@ -570,6 +574,61 @@ def process_page_regions(page, dpi, lang, export_crops=None, temp_crops_dir=None
     return img, results, crop_paths
 
 
+def stack_crop_images(paths, out_dir, name="continuation_stack.png"):
+    """Stack continuation-box crops vertically into one image so a merged
+    cross-page block can be enriched with a single VLM call."""
+    from PIL import Image
+
+    imgs = [Image.open(p) for p in paths]
+    w = max(im.size[0] for im in imgs)
+    h = sum(im.size[1] for im in imgs)
+    stacked = Image.new("RGB", (w, h), "white")
+    y = 0
+    for im in imgs:
+        stacked.paste(im, (0, y))
+        y += im.size[1]
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, name)
+    stacked.save(out)
+    return out
+
+
+def find_unboxed_code_clusters(img, prose_lines, all_boxes, pad=12, min_lines=3):
+    """Find code- or tree-like line clusters in the prose (unboxed)
+    regions of a page (handoff 15.5-1). Bordered boxes already reach the
+    VLM through crop enrichment; unboxed code listings and file trees do
+    not, which is the root cause of the remaining garbled regions.
+    Returns pseudo-box entries ((y0, y1, x0, x1), text) suitable for the
+    same crop-and-enrich path, with crop coordinates derived from the
+    cluster's line geometry (right edge measured from the page's dark
+    pixels so the crop stays tight)."""
+    if not prose_lines:
+        return []
+    heights = sorted(l["height"] for l in prose_lines)
+    median_height = heights[len(heights) // 2] or 1
+    W, H = img.size
+    dark = numpy.array(img) < 128
+    clusters = []
+    for block in group_into_paragraphs(prose_lines, median_height):
+        if len(block) < min_lines:
+            continue
+        if not (looks_like_code(block) or looks_like_ascii_art(block)):
+            continue
+        y0 = max(0, min(l["top"] for l in block) - pad)
+        y1 = min(H, max(l["bottom"] for l in block) + pad)
+        # Skip clusters that are actually inside a detected bordered box
+        # (defensive: masked prose should already exclude them).
+        if any(not (y1 < b[0] or y0 > b[1]) for b in all_boxes):
+            continue
+        x0 = max(0, min(l["left"] for l in block) - pad)
+        band = dark[y0:y1]
+        cols = numpy.flatnonzero(band.any(axis=0))
+        x1 = int(cols[-1]) + pad if len(cols) else W
+        text = "\n".join(l["text"] for l in block)
+        clusters.append(((y0, y1, x0, min(x1, W)), text))
+    return clusters
+
+
 def ocr_masked_page(img, box_results, dpi, lang):
     """OCR the full page with box interiors whited out, returning the
     normal line records for the prose regions."""
@@ -655,9 +714,11 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
             temp_crops_dir = tempfile.mkdtemp(prefix="pdf2md_vlm_")
             vlm.crops_dir = temp_crops_dir
 
-    parts = [f"# {os.path.splitext(os.path.basename(pdf_path))[0]}", ""]
+    title = strip_title_noise(os.path.splitext(os.path.basename(pdf_path))[0])
+    parts = [f"# {title}", ""]
     open_fence = None       # (tag, [lines]) of a fenced block awaiting continuation
     prev_page_state = None  # (box, text, near_bottom, page_h)
+    prev_origin_crop = None  # crop path of prev_page_state's box (for VLM)
 
     for pno, page in enumerate(doc, start=1):
         print(f"Processing page {pno}/{len(doc)}...", file=sys.stderr)
@@ -678,6 +739,13 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
             img, all_boxes, crop_paths = process_page_regions(page, dpi, lang, export_crops=export_crops, temp_crops_dir=temp_crops_dir)
             page_h = img.size[1]
             cont, standalone = boxes_continuing(prev_page_state, all_boxes)
+            if cont and open_fence is None:
+                # The continuation detector matched, but no fence was
+                # registered as open (e.g. the page's last fence had a tag
+                # the regex missed). Keep the content as a standalone box
+                # rather than dropping it silently.
+                standalone = cont + standalone
+                cont = []
             if cont and open_fence is not None:
                 tag, buf, fence_part_idx, fence_span = open_fence
                 for _, t in cont:
@@ -687,7 +755,25 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
                 # a fresh box: try Mermaid synthesis first, then language
                 # tagging.
                 fence = None
-                if use_mermaid and tag in ("", "mermaid"):
+                if vlm is not None:
+                    # Cross-page continuations get a VLM pass too; the
+                    # continuation crops are stacked so the model sees the
+                    # whole figure in one image.
+                    cont_crops = ([prev_origin_crop] if prev_origin_crop else []) \
+                        + [crop_paths.get(b) for b, _ in cont]
+                    cont_crops = [c for c in cont_crops if c and os.path.isfile(c)]
+                    if cont_crops:
+                        img_path = cont_crops[0]
+                        if len(cont_crops) > 1:
+                            try:
+                                img_path = stack_crop_images(
+                                    cont_crops,
+                                    temp_crops_dir or export_crops
+                                    or tempfile.gettempdir())
+                            except Exception:
+                                img_path = cont_crops[0]
+                        fence = vlm.enrich(merged, img_path) or None
+                if fence is None and use_mermaid and tag in ("", "mermaid"):
                     is_diag, diagram_block = parse_ascii_diagram_block(merged.splitlines())
                     if is_diag:
                         fence = diagram_block
@@ -705,6 +791,29 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
                 prose_lines = ocr_masked_page(img, all_boxes, dpi, lang)
             else:
                 prose_lines = []
+            if vlm is not None and prose_lines:
+                # Unboxed code/tree clusters reach the VLM too (handoff
+                # 15.5-1): they become pseudo-boxes with synthetic crops,
+                # then are removed from the prose lines so they cannot be
+                # rendered twice.
+                pseudo = find_unboxed_code_clusters(img, prose_lines, all_boxes)
+                for k, (pbox, ptext) in enumerate(pseudo, start=1):
+                    py0, py1, px0, px1 = pbox
+                    crop = img.crop((px0, py0, px1, py1))
+                    out_dir = temp_crops_dir or export_crops
+                    if out_dir:
+                        os.makedirs(out_dir, exist_ok=True)
+                        cpath = os.path.join(
+                            out_dir,
+                            f"page{page.number + 1}_unboxed{k}.png")
+                        crop.save(cpath)
+                        crop_paths[pbox] = cpath
+                    box_results = box_results + [(pbox, ptext)]
+                box_results.sort(key=lambda r: r[0][0])
+                prose_lines = [
+                    l for l in prose_lines
+                    if not any(not (l["bottom"] < pb[0] or l["top"] > pb[1])
+                               for pb, _ in pseudo)]
             if box_results:
                 box_overrides = {}
                 if vlm is not None:
@@ -724,6 +833,41 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
                 # Every box was consumed as a continuation; the prose pass
                 # still used the masked image, so just render its lines.
                 text = page_to_markdown(prose_lines, use_mermaid=use_mermaid)
+            elif vlm is not None:
+                # No bordered boxes, but the full-page OCR lines may still
+                # contain unboxed code/tree clusters (handoff 15.5-1):
+                # route them through the same pseudo-box enrich path.
+                lines = lines_from_ocr(ocr_page(page, dpi, lang))
+                from PIL import Image as _Image
+                img = _Image.open(io.BytesIO(render_page(page, dpi)))
+                pseudo = find_unboxed_code_clusters(img, lines, all_boxes)
+                if pseudo:
+                    remaining = list(lines)
+                    crop_paths = {}
+                    pseudo_results = []
+                    for k, (pbox, ptext) in enumerate(pseudo, start=1):
+                        py0, py1, px0, px1 = pbox
+                        crop = img.crop((px0, py0, px1, py1))
+                        out_dir = temp_crops_dir or export_crops
+                        if out_dir:
+                            os.makedirs(out_dir, exist_ok=True)
+                            cpath = os.path.join(
+                                out_dir,
+                                f"page{page.number + 1}_unboxed{k}.png")
+                            crop.save(cpath)
+                            crop_paths[pbox] = cpath
+                        pseudo_results.append((pbox, ptext))
+                        remaining = [
+                            l for l in remaining
+                            if l["bottom"] < pbox[0] or l["top"] > pbox[1]]
+                    box_overrides = vlm.enrich_box_results(
+                        pseudo_results, crop_paths,
+                        fallback=lambda cleaned: render_box_cleaned(cleaned, use_mermaid))
+                    text = merge_regions(remaining, pseudo_results, dpi, lang,
+                                         use_mermaid=use_mermaid,
+                                         box_overrides=box_overrides)
+                else:
+                    text = page_to_markdown(lines, use_mermaid=use_mermaid)
             else:
                 lines = lines_from_ocr(ocr_page(page, dpi, lang))
                 text = page_to_markdown(lines, use_mermaid=use_mermaid)
@@ -737,10 +881,13 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
                 raw_bottom_text = clean_box_text(bottom[1])
                 prev_page_state = (bottom[0], bottom[1],
                                    bottom_continues, page_h)
+                prev_origin_crop = crop_paths.get(bottom[0])
             else:
                 prev_page_state = None
+                prev_origin_crop = None
         else:
             prev_page_state = None
+            prev_origin_crop = None
             text = page_to_markdown(lines, use_mermaid=use_mermaid)
 
         src = ("text layer" if used_text_layer
@@ -758,7 +905,7 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
         if (not used_text_layer and prev_page_state and prev_page_state[2]
                 and text and bottom_continues):
             m = None
-            for m in re.finditer(r"```(\w*)\n(.*?)\n```", text, re.DOTALL):
+            for m in re.finditer(r"```([\w-]*)\n(.*?)\n```", text, re.DOTALL):
                 pass
             if m and m.end() >= len(text) - 4:
                 open_fence = ("", [raw_bottom_text],

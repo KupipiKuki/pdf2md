@@ -1256,3 +1256,142 @@ even if `vlm_backend == polish_backend` (e.g. using `gemini-2.5-flash` for both 
 3. Unit: `pdf2md` with `--vlm M --polish M` does NOT prompt to pause; with `--vlm A --polish B` it DOES prompt.
 4. Unit: All 102 tests pass with 0 `ResourceWarning` notices.
 
+
+---
+
+## 15. Local-Server VLM Pass on New Reference Document (Python_Power_Systems_Review_20261025_0001.pdf)
+
+First full VLM-enriched conversion of a new 11-page scan, run entirely against a
+local llama.cpp model-router server (`http://localhost:9931/v1`) — no cloud API.
+
+### 15.1 Environment
+
+- **Server:** llama.cpp router on port 9931; models load on demand (measured:
+  Qwen3-VL-8B ~22 s, Qwen2.5-14B ~50 s).
+- **Backends used:** `openai:unsloth/Qwen3-VL-8B-Instruct-1M-GGUF:Q8_0@http://localhost:9931/v1`
+  (`--vlm`), `openai:RichardErkhov/unsloth_-_Qwen2.5-14B-Instruct-gguf:Q4_K_M@http://localhost:9931/v1`
+  (`--polish`, non-thinking instruct model chosen deliberately).
+- **Artifacts:** `scratch/python_review/` (baseline md, crops/, run logs,
+  `python_review_final3.md` final output).
+
+### 15.2 Defects found by live probing (probe scripts in scratch/python_review/)
+
+1. **Mode C empty-topology content loss.** The `loads/` file tree matched SLD
+   keyword `transformer` via `transformers.py`, routed to `sld_topology`,
+   and the model's (correct) `{"components": [], "connections": []}` was
+   ACCEPTED as an override, deleting the tree from the output.
+2. **SLD keyword substring matching.** Any text containing `transformer`,
+   `bus`, `relay`, `ansi` as a substring misclassified as `electrical_sld`.
+3. **Cross-page continuations bypassed VLM.** Merged continuation blocks were
+   re-rendered deterministically; the standards/ tree (p2->3) stayed garbled.
+4. **Mode B gutter-number pollution.** Scans number tree lines in the margin;
+   the VLM used them as node IDs (`2 --> 3[nesc/]`).
+5. **60 s backend timeout vs. ~50 s model swaps** on a single-GPU router.
+
+### 15.3 Fixes applied (all test-covered, suite 128 green + smoke)
+
+1. `postprocess_mode_c` rejects empty components+connections (falls back to
+   deterministic render). Test `test_postprocess_mode_c_rejects_empty_topology`
+   replaces the old assertion that empty was valid.
+2. Classifier SLD/P&ID keywords now word-boundary regexes
+   (`FigureClassifier.__init__` compiles `_sld_re`/`_pid_re`).
+   Tests: file tree not misrouted; real SLD text still detected.
+3. `pdf2md.convert` routes merged continuation blocks through `vlm.enrich`
+   using a vertically stacked composite of the ORIGIN box crop + continuation
+   crops (`stack_crop_images`, origin path carried in `prev_origin_crop`).
+   First attempt stacked only continuation crops and silently dropped the
+   origin half of two boxes; caught in review and fixed before merge.
+4. Mode B prompt: margin/gutter numbers must be ignored as node IDs/labels.
+5. `OpenAICompatBackend.TIMEOUT_SECONDS` overridable via `PDF2MD_VLM_TIMEOUT`.
+
+### 15.4 Results (deterministic -> final)
+
+- `pole class` -> `pole_class`; `C3` -> `C**3`; `Heavyi}` -> `HeavyIce`;
+  `PostGIs` -> `PostGIS`; broken formula lines reassembled; language tags on
+  all fenced blocks; `loads/` tree recovered with box-drawing glyphs;
+  standards/ tree is now a complete, correct mermaid hierarchy
+  (root + 4 subtrees + 7 files, `1724E200/1724E204` read correctly).
+- Polish pass: conservative by design (2 polished / 5 unchanged /
+  16 line-drift-rejected); introduced one minor artifact
+  (`I Pole Review Agent Input:`).
+
+### 15.5 Known remaining gaps (roadmap)
+
+1. **Unboxed regions never reach the VLM** (root cause of all remaining
+   defects): page-3 JSON metadata (unclosed fence, curly quote), page-5
+   run-on code line + gutter leaks (`| 1 deflectionFactor`), page-9 folder
+   tree garble, page-10 tree fragments misrendered as `##` headings.
+   Next iteration: propose synthetic crops from unboxed code/tree-like prose
+   line clusters and route them through the same enrich path.
+2. Mermaid node-ID styling from Mode B (`standards[/]`, bare `2023.json`
+   IDs) is valid-but-ugly; prompt should request quoted `A["label"]` form.
+3. Polish line-drift guard rejects most repairs; consider fuzzy line
+   alignment so repairs with reflowed whitespace can be accepted.
+
+---
+
+## 16. Roadmap Pass: Unboxed-Cluster VLM Routing, Mode B Node Form, Polish Fuzzy Alignment
+
+Implements the three remaining Section 15.5 roadmap items. All changes are
+unit-test-covered; the suite grew 128 -> 136, all passing. (End-to-end runs
+against the local llama.cpp router are not possible from this sandbox; the
+wiring is verified with a mocked OCR + recording VLM backend instead.)
+
+### 16.1 Unboxed code/tree clusters reach the VLM (15.5-1)
+
+Root cause of the remaining defects was that only bordered-box crops were
+enriched; unboxed code listings and file trees went through the
+deterministic prose pass and stayed garbled.
+
+- New `find_unboxed_code_clusters(img, prose_lines, all_boxes)` in
+  `scripts/pdf2md.py`: groups prose lines into paragraphs, keeps blocks
+  that look like code (`looks_like_code`) or ASCII art
+  (`looks_like_ascii_art`) with >= 3 lines, skips anything overlapping a
+  detected bordered box, and emits pseudo-box entries
+  `((y0, y1, x0, x1), text)` with a tight crop (right edge measured from
+  the page's dark pixels).
+- `convert()` routes them through the same path as real boxes: synthetic
+  crops saved as `pageN_unboxedK.png`, appended to `box_results`, sent to
+  `vlm.enrich_box_results` (Mode A transcription / Mode B mermaid /
+  treeView per classifier), and removed from the prose lines so they
+  cannot be rendered twice. Both the masked-prose branch (boxes present)
+  and the full-page-OCR branch (no boxes) route clusters.
+- Verified with a mocked tesseract + recording backend: an unboxed
+  `polecad_next/` file tree is cropped to `page1_unboxed1.png`, sent to
+  the VLM, and the prose lines no longer leak garbled tree text.
+
+### 16.2 Mode B prompt requests quoted node form (15.5-2)
+
+`PROMPT_DIAGRAM_TO_MERMAID` now requires short ASCII node IDs with the
+label attached in quoted bracket form (`A["Label"]`) and explicitly bans
+bare labels, file names, or path fragments as node IDs (the
+`standards[/]` / bare `2023.json` IDs observed in the live run).
+
+### 16.3 Polish fuzzy line alignment (15.5-3)
+
+`_lines_align` in `docling_engineering/polish.py` relaxes the strict
+equal-line-count drift guard. A response with a different line count is
+accepted only when one of these holds:
+
+1. pure reflow: identical normalized joined text (only wrapping changed);
+2. character repairs with reflow: same word count and >= 0.9 joined-text
+   similarity (single-character misread fixes such as `|` -> `I`, wrapped
+   differently); or
+3. one-to-one line matching: every original line has a distinct new line
+   with identical or >= 0.9-normalized-similar content.
+
+Invented lines, deleted lines, and full rewrites are still rejected
+fail-closed; same-line-count responses behave exactly as before.
+
+### 16.4 Verification
+
+- `python3 tests/test_heuristics.py`: 136 tests, OK (8 new: prompt form,
+  polish reflow/repair/reflow+repair/invention rejection,
+  `_lines_align` cases, cluster detection / prose ignore / box overlap
+  skip).
+- Mocked end-to-end: unboxed tree cluster -> `page1_unboxed1.png` crop ->
+  VLM call -> fenced output; prose line no longer duplicated.
+- Sandbox limitations: no tesseract binary and no local model server, so
+  the live OCR + VLM regeneration of
+  `Python_Power_Systems_Review_20261025_0001.pdf` must be re-run by the
+  user with the same backends as Section 15.1.

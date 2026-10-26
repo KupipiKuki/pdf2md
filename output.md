@@ -2,49 +2,39 @@
 
 <!-- page 1 (OCR + box regions) -->
 
-| think that's actually the architecture I'd recommend.
+I think that's actually the architecture I'd recommend.
 
 The weakness isn't Docling's OCR or document understanding. The weakness is that an electrical single-line diagram is fundamentally a graph with engineering semantics, not a document.
 
-Proposed Pipeline
+### Proposed Pipeline
 
 ```mermaid
 flowchart TD
-    PDF_1["PDF"]
-    Docling_2["Docling"]
-    Normaltextta_3["Normal text/tables"]
-    StandardDocl_4["Standard Docling extraction"]
-    Figuredetect_5["Figure detector"]
-    Photograph_6["Photograph"]
-    Plot_7["Plot"]
-    schematic_8["schematic"]
-    PID_9["P&ID"]
-    ElectricalSL_10["Electrical SLD &lt;-- route here"]
-    VisionModelE_11["Vision Model + Engineering Agent"]
-    StructuredGr_12["Structured Graph"]
-    EngineeringD_13["Engineering Documentation"]
-    PDF_1 --> Docling_2
-    Docling_2 --> Normaltextta_3
-    Normaltextta_3 --> StandardDocl_4
-    Normaltextta_3 --> Figuredetect_5
-    Figuredetect_5 --> Photograph_6
-    Figuredetect_5 --> Plot_7
-    Figuredetect_5 --> schematic_8
-    Figuredetect_5 --> PID_9
-    Figuredetect_5 --> ElectricalSL_10
-    ElectricalSL_10 --> VisionModelE_11
-    VisionModelE_11 --> StructuredGr_12
-    StructuredGr_12 --> EngineeringD_13
+    PDF --> Docling
+    Docling --> Normal_text_tables["Normal text/tables"]
+    Docling --> Figure_detector["Figure detector"]
+    Normal_text_tables --> Standard_Docling_extraction["Standard Docling extraction"]
+    Figure_detector --> Photograph["Photograph"]
+    Figure_detector --> Plot["Plot"]
+    Figure_detector --> Schematic["Schematic"]
+    Figure_detector --> P_ID["P&ID"]
+    Figure_detector --> Electrical_SLD["Electrical SLD"]
+    Electrical_SLD <--- route_here["route here"]
+    Figure_detector --> Vision_Model_Engineering_Agent["Vision Model + Engineering Agent"]
+    Vision_Model_Engineering_Agent --> Structured_Graph["Structured Graph"]
+    Structured_Graph --> Engineering_Documentation["Engineering Documentation"]
 ```
 
-Stage 1: Detect “engineering drawings" The extension doesn't need to fully understand the diagram initially.
+### Stage 1: Detect “engineering drawings"
+
+The extension doesn't need to fully understand the diagram initially.
 
 Just classify:
 
 ```json
 {
-    "figure_type": "electrical_single line",
-    "confidence": 0.94
+  "figure_type": "electrical_single_line",
+  "confidence": 0.94
 }
 ```
 
@@ -62,22 +52,17 @@ Features are surprisingly simple:
 
 A lightweight CV classifier could do this.
 
-Stage 2: Vision Model Extraction Once identified, send only the cropped diagram to a multimodal model.
+### Stage 2: Vision Model Extraction
+
+Once identified, send only the cropped diagram to a multimodal model.
 
 Prompt example:
 
-```
-Analyze this electrical power-system
-single-line diagram.
-Identify:
-- Components
-- Connectivity
-- Ratings
-- Grounding methods
-- Transformer vector groups
-- Breakers
-- Protective devices
-Return JSON.
+```json
+{
+  "components": [],
+  "connections": []
+}
 ```
 
 Expected result:
@@ -108,7 +93,9 @@ Expected result:
 
 <!-- page 3 (OCR + box regions) -->
 
-Stage 3: Python Engineering Plugin This is where the real value lives.
+### Stage 3: Python Engineering Plugin
+
+This is where the real value lives.
 
 Convert extracted JSON into a network graph.
 
@@ -120,20 +107,15 @@ Build:
 
 ```mermaid
 flowchart TD
-    G_1["G"]
-    T1_2["T1"]
-    LINE_3["LINE"]
-    T2_4["T2"]
-    M_5["M"]
-    G_1 --- T1_2
-    T1_2 --- LINE_3
-    LINE_3 --- T2_4
-    T2_4 --- M_5
+    G --> T1
+    T1 --> LINE
+    LINE --> T2
+    T2 --> M
 ```
 
 Then automatically derive:
 
-Positive Sequence Network
+### Positive Sequence Network
 
 ```mermaid
 flowchart TD
@@ -150,31 +132,34 @@ flowchart TD
 
 <!-- page 4 (OCR + box regions) -->
 
-Negative Sequence Network
+### Negative Sequence Network
 
 ```mermaid
 flowchart TD
-    N1["X2(G)"]
-    N2["XT1"]
-    N3["XLINE"]
-    N4["XT2"]
-    N5["X2(M)"]
-    N1 --- N2
-    N2 --- N3
-    N3 --- N4
-    N4 --- N5
+    X2(G) --> +
+    + --> XT1
+    XT1 --> +
+    + --> XLINE
+    XLINE --> +
+    + --> XT2
+    XT2 --> +
+    + --> X2(M)
 ```
 
-Zero Sequence Network Apply transformer rules:
+### Zero Sequence Network
+
+Apply transformer rules:
 
 ```python
 if transformer.primary == "delta":
-    block zero sequence()
+    block_zero_sequence()
 ```
 
 Now you are producing engineering knowledge instead of OCR.
 
-Stage 4: Specialized Engineering Agent The agent can then generate explanations like: | Transformer T1 is connected A-Yg. The delta winding prevents zero-sequence currents | from propagating between the generator and transmission network. Consequently, the _ generator zero-sequence network is isolated from the transmission line zero-sequence network.
+### Stage 4: Specialized Engineering Agent
+
+The agent can then generate explanations like: I Transformer T1 is connected A-Yg. The delta winding prevents zero-sequence currents I from propagating between the generator and transmission network. Consequently, the _ generator zero-sequence network is isolated from the transmission line zero-sequence network.
 
 That's exactly the sort of explanation that utilities, consultants, and protection engineers want.
 
@@ -187,7 +172,6 @@ class Transformer:
     pass
 class TransmissionLine:
     pass
-:
 class Bus:
     pass
 class Breaker:
@@ -200,14 +184,20 @@ Then the vision output simply fills these objects.
 
 Example:
 
-```
-Transformer (
-    name="T1",
-    rating mva=100,
-    primary_kv=13.8,
-    secondary_kv=138,
-    vector_group="Dyg",
-    Z_pu=@.10
+```json
+{
+  "components": [
+    {
+      "id": "T1",
+      "type": "transformer",
+      "rating_mva": 100,
+      "kv": null,
+      "connection": null,
+      "vector_group": "Dyg",
+      "z_pu": 0.1
+    }
+  ],
+  "connections": []
 }
 ```
 
@@ -222,25 +212,19 @@ Now downstream modules can:
 
 without asking the LLM to reason from raw text every time.
 
-What I'd Actually Build If | were extending Docling today, I'd add:
+### What I'd Actually Build
 
-```mermaid
-flowchart TD
-    Docling_1["Docling"]
-    EngineeringF_2["EngineeringFigureExtension"]
-    ElectricalSL_3["Electrical SLD"]
-    ProtectionSc_4["Protection Scheme"]
-    PID_5["P&ID"]
-    CivilDrawing_6["Civil Drawing"]
-    MechanicalAs_7["Mechanical Assembly"]
-    ControlNarra_8["Control Narrative"]
-    Docling_1 --> EngineeringF_2
-    EngineeringF_2 --> ElectricalSL_3
-    EngineeringF_2 --> ProtectionSc_4
-    ProtectionSc_4 --> PID_5
-    Docling_1 --> CivilDrawing_6
-    CivilDrawing_6 --> MechanicalAs_7
-    ElectricalSL_3 --> ControlNarra_8
+If I were extending Docling today, I'd add:
+
+```treeView-beta
+Docling
+└── EngineeringFigureExtension
+    ├── Electrical SLD
+    ├── Protection Scheme
+    ├── P&ID
+    ├── Civil Drawing
+    ├── Mechanical Assembly
+    └── Control Narrative
 ```
 
 <!-- page 6 (OCR + box regions) -->

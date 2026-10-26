@@ -14,7 +14,14 @@ Rules:
 1. Emit either 'flowchart TD' or 'flowchart LR' based on the primary layout orientation.
 2. Faithfully capture multi-node fan-in (multiple arrows converging on one node) and fan-out.
 3. Clean OCR noise in node labels.
-4. Output ONLY the ```mermaid code block."""
+4. The scan may show margin line numbers (gutter numbers) along the left
+   edge of the diagram; ignore them entirely and never emit them as node
+   IDs or labels.
+5. Use short ASCII node IDs (A, B, C, ...) and always attach the label in
+   the quoted bracket form A["Label"]. Never use a bare label, a file
+   name, or a path fragment as the node ID (standards[/] and bare
+   2023.json IDs are invalid).
+6. Output ONLY the ```mermaid code block."""
 
 PROMPT_SLD_TOPOLOGY = """Analyze this electrical power-system single-line diagram (SLD).
 Extract all electrical entities and connectivity into strict JSON matching this schema:
