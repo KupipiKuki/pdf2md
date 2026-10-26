@@ -593,6 +593,42 @@ def stack_crop_images(paths, out_dir, name="continuation_stack.png"):
     return out
 
 
+def find_unboxed_code_clusters(img, prose_lines, all_boxes, pad=12, min_lines=3):
+    """Find code- or tree-like line clusters in the prose (unboxed)
+    regions of a page (handoff 15.5-1). Bordered boxes already reach the
+    VLM through crop enrichment; unboxed code listings and file trees do
+    not, which is the root cause of the remaining garbled regions.
+    Returns pseudo-box entries ((y0, y1, x0, x1), text) suitable for the
+    same crop-and-enrich path, with crop coordinates derived from the
+    cluster's line geometry (right edge measured from the page's dark
+    pixels so the crop stays tight)."""
+    if not prose_lines:
+        return []
+    heights = sorted(l["height"] for l in prose_lines)
+    median_height = heights[len(heights) // 2] or 1
+    W, H = img.size
+    dark = numpy.array(img) < 128
+    clusters = []
+    for block in group_into_paragraphs(prose_lines, median_height):
+        if len(block) < min_lines:
+            continue
+        if not (looks_like_code(block) or looks_like_ascii_art(block)):
+            continue
+        y0 = max(0, min(l["top"] for l in block) - pad)
+        y1 = min(H, max(l["bottom"] for l in block) + pad)
+        # Skip clusters that are actually inside a detected bordered box
+        # (defensive: masked prose should already exclude them).
+        if any(not (y1 < b[0] or y0 > b[1]) for b in all_boxes):
+            continue
+        x0 = max(0, min(l["left"] for l in block) - pad)
+        band = dark[y0:y1]
+        cols = numpy.flatnonzero(band.any(axis=0))
+        x1 = int(cols[-1]) + pad if len(cols) else W
+        text = "\n".join(l["text"] for l in block)
+        clusters.append(((y0, y1, x0, min(x1, W)), text))
+    return clusters
+
+
 def ocr_masked_page(img, box_results, dpi, lang):
     """OCR the full page with box interiors whited out, returning the
     normal line records for the prose regions."""
@@ -755,6 +791,29 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
                 prose_lines = ocr_masked_page(img, all_boxes, dpi, lang)
             else:
                 prose_lines = []
+            if vlm is not None and prose_lines:
+                # Unboxed code/tree clusters reach the VLM too (handoff
+                # 15.5-1): they become pseudo-boxes with synthetic crops,
+                # then are removed from the prose lines so they cannot be
+                # rendered twice.
+                pseudo = find_unboxed_code_clusters(img, prose_lines, all_boxes)
+                for k, (pbox, ptext) in enumerate(pseudo, start=1):
+                    py0, py1, px0, px1 = pbox
+                    crop = img.crop((px0, py0, px1, py1))
+                    out_dir = temp_crops_dir or export_crops
+                    if out_dir:
+                        os.makedirs(out_dir, exist_ok=True)
+                        cpath = os.path.join(
+                            out_dir,
+                            f"page{page.number + 1}_unboxed{k}.png")
+                        crop.save(cpath)
+                        crop_paths[pbox] = cpath
+                    box_results = box_results + [(pbox, ptext)]
+                box_results.sort(key=lambda r: r[0][0])
+                prose_lines = [
+                    l for l in prose_lines
+                    if not any(not (l["bottom"] < pb[0] or l["top"] > pb[1])
+                               for pb, _ in pseudo)]
             if box_results:
                 box_overrides = {}
                 if vlm is not None:
@@ -774,6 +833,41 @@ def convert(pdf_path, out_path, lang, dpi, prefer_text_layer, save_images, use_m
                 # Every box was consumed as a continuation; the prose pass
                 # still used the masked image, so just render its lines.
                 text = page_to_markdown(prose_lines, use_mermaid=use_mermaid)
+            elif vlm is not None:
+                # No bordered boxes, but the full-page OCR lines may still
+                # contain unboxed code/tree clusters (handoff 15.5-1):
+                # route them through the same pseudo-box enrich path.
+                lines = lines_from_ocr(ocr_page(page, dpi, lang))
+                from PIL import Image as _Image
+                img = _Image.open(io.BytesIO(render_page(page, dpi)))
+                pseudo = find_unboxed_code_clusters(img, lines, all_boxes)
+                if pseudo:
+                    remaining = list(lines)
+                    crop_paths = {}
+                    pseudo_results = []
+                    for k, (pbox, ptext) in enumerate(pseudo, start=1):
+                        py0, py1, px0, px1 = pbox
+                        crop = img.crop((px0, py0, px1, py1))
+                        out_dir = temp_crops_dir or export_crops
+                        if out_dir:
+                            os.makedirs(out_dir, exist_ok=True)
+                            cpath = os.path.join(
+                                out_dir,
+                                f"page{page.number + 1}_unboxed{k}.png")
+                            crop.save(cpath)
+                            crop_paths[pbox] = cpath
+                        pseudo_results.append((pbox, ptext))
+                        remaining = [
+                            l for l in remaining
+                            if l["bottom"] < pbox[0] or l["top"] > pbox[1]]
+                    box_overrides = vlm.enrich_box_results(
+                        pseudo_results, crop_paths,
+                        fallback=lambda cleaned: render_box_cleaned(cleaned, use_mermaid))
+                    text = merge_regions(remaining, pseudo_results, dpi, lang,
+                                         use_mermaid=use_mermaid,
+                                         box_overrides=box_overrides)
+                else:
+                    text = page_to_markdown(lines, use_mermaid=use_mermaid)
             else:
                 lines = lines_from_ocr(ocr_page(page, dpi, lang))
                 text = page_to_markdown(lines, use_mermaid=use_mermaid)

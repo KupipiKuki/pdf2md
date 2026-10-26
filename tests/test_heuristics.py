@@ -28,6 +28,7 @@ from pdf2md import (
     HEADING_CUE_RE,
     reconstruct_indented_lines,
     stack_crop_images,
+    find_unboxed_code_clusters,
 )
 
 
@@ -1550,6 +1551,126 @@ class TestContinuationFenceTag(unittest.TestCase):
             cont = []
         self.assertEqual(cont, [])
         self.assertEqual(len(standalone), 1)
+
+
+
+
+class TestSection15Roadmap(unittest.TestCase):
+    """Handoff 15.5 roadmap: Mode B node-ID form, polish fuzzy
+    alignment, and unboxed-cluster detection."""
+
+    def test_mode_b_prompt_requests_quoted_label_form(self):
+        from docling_engineering.prompts import PROMPT_DIAGRAM_TO_MERMAID
+        self.assertIn('A["Label"]', PROMPT_DIAGRAM_TO_MERMAID)
+        self.assertIn("Never use a bare label", PROMPT_DIAGRAM_TO_MERMAID)
+
+    def test_polish_accepts_char_repair_with_reflow(self):
+        from docling_engineering.polish import polish_markdown
+
+        class RepairReflowLLM:
+            def complete_text(self, text):
+                # Character repair AND a reflowed line split
+                return text.replace("| think", "I think").replace(
+                    "layered design", "layered\ndesign")
+
+        md = ("Given the audit | think the recommended architecture "
+              "is a layered design over time.\n")
+        out = polish_markdown(md, RepairReflowLLM())
+        self.assertIn("I think the recommended architecture is a layered", out)
+        self.assertNotIn("| think", out)
+
+    def test_polish_accepts_whitespace_reflow(self):
+        from docling_engineering.polish import polish_markdown
+
+        class ReflowLLM:
+            def complete_text(self, text):
+                # Model split the long line into two; words unchanged
+                return text.replace(
+                    "the recommended architecture is a layered design",
+                    "the recommended architecture is\na layered design")
+
+        md = "Given the audit, the recommended architecture is a layered design.\n"
+        out = polish_markdown(md, ReflowLLM())
+        self.assertIn("a layered design", out)
+
+    def test_polish_accepts_reordered_whitespace_only(self):
+        from docling_engineering.polish import polish_markdown, _lines_align
+        self.assertTrue(_lines_align(
+            ["alpha beta gamma"], ["alpha  beta", "gamma"]))
+        self.assertFalse(_lines_align(
+            ["alpha beta gamma"], ["alpha", "totally different content"]))
+        self.assertFalse(_lines_align(
+            ["alpha", "beta"], ["alpha", "beta", "invented line"]))
+
+    def test_polish_still_rejects_invented_lines(self):
+        from docling_engineering.polish import polish_markdown
+
+        class InventLLM:
+            def complete_text(self, text):
+                return text + "\nEntirely new sentence the model invented."
+
+        md = "| think this is prose long enough to be polished by the guard.\n"
+        out = polish_markdown(md, InventLLM())
+        self.assertIn("| think this is prose", out)
+
+    def test_find_unboxed_code_clusters_detects_code(self):
+        from PIL import Image
+        import numpy as np
+        img = Image.new("L", (400, 200), 255)
+        arr = np.array(img)
+        # Paint text-like dark pixels for the cluster rows
+        for y in (20, 40, 60):
+            arr[y, 50:300] = 0
+        img = Image.fromarray(arr)
+        lines = [
+            {"text": '1 pole = {"id": "P1"}', "top": 15, "bottom": 25,
+             "height": 10, "left": 50},
+            {"text": "2 span = get_span( )", "top": 35, "bottom": 45,
+             "height": 10, "left": 50},
+            {"text": "3 if span > 0:", "top": 55, "bottom": 65,
+             "height": 10, "left": 50},
+        ]
+        clusters = find_unboxed_code_clusters(img, lines, all_boxes=[])
+        self.assertEqual(len(clusters), 1)
+        (box, text) = clusters[0]
+        self.assertIn('pole = {"id": "P1"}', text)
+        y0, y1, x0, x1 = box
+        self.assertLess(y0, 15)
+        self.assertGreater(y1, 65)
+        self.assertLess(x0, 50)
+        self.assertGreater(x1, 300)
+
+    def test_find_unboxed_code_clusters_ignores_prose(self):
+        from PIL import Image
+        img = Image.new("L", (400, 200), 255)
+        lines = [
+            {"text": "This is a prose paragraph about poles and wires.",
+             "top": 15, "bottom": 25, "height": 10, "left": 50},
+            {"text": "It continues with more narrative sentence text here.",
+             "top": 35, "bottom": 45, "height": 10, "left": 50},
+            {"text": "And finishes with a third line of ordinary prose.",
+             "top": 55, "bottom": 65, "height": 10, "left": 50},
+        ]
+        self.assertEqual(find_unboxed_code_clusters(img, lines, []), [])
+
+    def test_find_unboxed_code_clusters_skips_inside_boxes(self):
+        from PIL import Image
+        import numpy as np
+        arr = np.full((200, 400), 255, dtype=np.uint8)
+        for y in (20, 40, 60):
+            arr[y, 50:300] = 0
+        img = Image.fromarray(arr)
+        lines = [
+            {"text": '1 d = {"a": 1}', "top": 15, "bottom": 25, "height": 10,
+             "left": 50},
+            {"text": "2 x = [d[\"a\"]", "top": 35, "bottom": 45, "height": 10,
+             "left": 50},
+            {"text": "3 if x > 0:", "top": 55, "bottom": 65, "height": 10,
+             "left": 50},
+        ]
+        # A bordered box covers the same y-range: cluster must be skipped
+        boxes = [(10, 70, 40, 310)]
+        self.assertEqual(find_unboxed_code_clusters(img, lines, boxes), [])
 
 
 if __name__ == "__main__":
