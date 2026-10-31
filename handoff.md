@@ -1395,3 +1395,39 @@ fail-closed; same-line-count responses behave exactly as before.
   the live OCR + VLM regeneration of
   `Python_Power_Systems_Review_20261025_0001.pdf` must be re-run by the
   user with the same backends as Section 15.1.
+
+---
+
+## 17. VLM Model Sweep Recipe (Python_Power_Systems_Review_20261025_0001.pdf)
+
+Candidate vision backends for the `--vlm` stage, to be swept against the
+new 11-page reference document on the local llama.cpp model router
+(models load on demand, so the sweep can run unattended):
+
+```bash
+python scripts/model_sweep.py \
+    /path/to/Python_Power_Systems_Review_20261025_0001.pdf \
+    --mode vlm --yes --force \
+    --ref scratch/python_review/python_review_final3.md \
+    --out-dir scratch/python_review/sweep \
+    --models \
+      openai:ggml-org/GLM-OCR-GGUF:F16@http://localhost:9931/v1 \
+      openai:unsloth/Qwen3-VL-8B-Instruct-1M-GGUF:Q8_0@http://localhost:9931/v1 \
+      openai:unsloth/Qwen2.5-VL-7B-Instruct-GGUF@http://localhost:9931/v1 \
+      openai:leafspark/Llama-3.2-11B-Vision-Instruct-GGUF@http://localhost:9931/v1
+```
+
+- `--yes` (new) skips the interactive load-model pauses: the router swaps
+  models per request, so no manual swapping is needed.
+- The reference for scoring is the user-curated final VLM output
+  (`python_review_final3.md`); `--ref` accepts any curated markdown.
+- Each run exports no crops by default; add `--export-crops DIR` to the
+  underlying pdf2md call by editing `run_pipeline` if crop debugging is
+  needed.
+- Expected: GLM-OCR (OCR-specialized) vs Qwen3-VL-8B (incumbent from
+  Section 15.1) vs Qwen2.5-VL-7B vs Llama-3.2-11B-Vision. Watch for:
+  first-request model-load latency (raise `PDF2MD_VLM_TIMEOUT`), Mode B
+  label quality (quoted `A["label"]` form is now prompt-mandated), and
+  empty-topology rejections in Mode C.
+- Cannot be executed from this sandbox (no tesseract binary, no access to
+  the user's localhost router); recorded here for the user to run.

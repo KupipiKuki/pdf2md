@@ -77,6 +77,10 @@ def main():
                          "(Phi-4, Qwen2.5-Instruct, Mistral-Nemo) must use --mode polish.")
     ap.add_argument("--force", action="store_true",
                     help="Re-run models that already have a result")
+    ap.add_argument("--yes", "-y", action="store_true",
+                    help="Non-interactive: skip the load-model pauses. Use this "
+                         "when the server loads models on demand (llama.cpp "
+                         "model-router, LM Studio), so the sweep runs unattended.")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -97,14 +101,15 @@ def main():
             continue
 
         print(f"\n[sweep] {idx}/{total} model: {spec}", file=sys.stderr)
-        print("[sweep] make sure this model is loaded and serving, "
-              "then press Enter to run (Ctrl+C to abort)...",
-              file=sys.stderr)
-        try:
-            input()
-        except (EOFError, KeyboardInterrupt):
-            print("[sweep] aborted by user", file=sys.stderr)
-            break
+        if not args.yes:
+            print("[sweep] make sure this model is loaded and serving, "
+                  "then press Enter to run (Ctrl+C to abort)...",
+                  file=sys.stderr)
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                print("[sweep] aborted by user", file=sys.stderr)
+                break
 
         rc = run_pipeline(args.pdf, out_path, spec, mode=args.mode)
         if rc != 0:

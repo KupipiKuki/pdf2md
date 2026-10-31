@@ -1253,6 +1253,30 @@ class TestModelSweep(unittest.TestCase):
                          "qwen2.5-vl_7b")
         self.assertEqual(model_slug("local:Llama-3.2-11B-Vision"), "Llama-3.2-11B-Vision")
 
+    def test_sweep_yes_flag_runs_unattended(self):
+        """--yes skips the load-model pause (llama.cpp router loads on
+        demand, so sweeps can run unattended)."""
+        import tempfile
+        from unittest.mock import patch
+        import scripts.model_sweep as sweep
+
+        tmp = tempfile.mkdtemp()
+        fake_pdf = os.path.join(tmp, "doc.pdf")
+        open(fake_pdf, "w").close()
+        out_dir = os.path.join(tmp, "sweep")
+        argv = ["model_sweep.py", fake_pdf, "--yes",
+                "--models", "openai:model-a@http://localhost:9931/v1",
+                "--ref", os.path.join(tmp, "ref.md"),
+                "--out-dir", out_dir]
+        with patch.object(sweep, "run_pipeline", return_value=0) as mock_run, \
+             patch.object(sweep, "run_benchmark", return_value=(0.7, "report")), \
+             patch("builtins.input") as mock_input:
+            with patch.object(sys, "argv", argv):
+                rc = sweep.main()
+        self.assertEqual(rc, 0)
+        mock_input.assert_not_called()
+        self.assertEqual(mock_run.call_count, 1)
+
     def test_sweep_records_ratio_and_ranks(self):
         import tempfile
         import shutil
