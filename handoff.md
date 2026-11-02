@@ -1262,7 +1262,7 @@ even if `vlm_backend == polish_backend` (e.g. using `gemini-2.5-flash` for both 
 ## 15. Local-Server VLM Pass on New Reference Document (Python_Power_Systems_Review_20261025_0001.pdf)
 
 First full VLM-enriched conversion of a new 11-page scan, run entirely against a
-local llama.cpp model-router server (`http://localhost:9931/v1`) � no cloud API.
+local llama.cpp model-router server (`http://localhost:9931/v1`)  no cloud API.
 
 ### 15.1 Environment
 
@@ -1398,7 +1398,142 @@ fail-closed; same-line-count responses behave exactly as before.
 
 ---
 
-## 17. VLM Model Sweep Recipe (Python_Power_Systems_Review_20261025_0001.pdf)
+## 17. Remote llama.cpp Server Test + 30B Single-Model Full Pass
+
+Second-day session: new LAN server `http://192.168.1.138:9931` (key-protected;
+`OPENAI_API_KEY` env consumed by `OpenAICompatBackend`), one resident model at
+a time above ~27B due to host memory (64 GB combined VRAM/RAM).
+
+### 17.1 Server test findings
+
+- `/health` public; `/v1/models` and completions require
+  `Authorization: Bearer <key>`. No unload endpoint exists (404s on
+  `/unload`, `/models/unload`, `DELETE /v1/models/{id}`)  the router loads
+  on demand and holds models resident.
+- **KV-cache sizing matters.** Presets specified 262144 ctx: a 30B-A3B model
+  reserves ~26 GB of f16 KV on top of ~17 GB weights (~43 GB total). Loading
+  a second 30B alongside the first OOMs the host (500 from the server, then
+  connection failure). Pipeline calls need <=8k tokens; cap presets at
+  ctx-size 16384.
+- Qwen3-VL-30B-A3B-Instruct Q4_K_M: ~28 s cold load, ~9.5 s per Mode B crop
+  call. Vision quality: flawless on the standards-tree benchmark crop.
+- One mid-run TCP dropout (WinError 10060) self-recovered on subsequent
+  calls; the backend fails closed per-box (deterministic fallback) so the
+  run completes with localized degradation only.
+
+### 17.2 Crash fix on the overnight unboxed-region code (commit 9a8b1a0)
+
+`find_unboxed_code_clusters` iterated `all_boxes` as bare box tuples, but
+`convert()` passes `process_page_regions` results = `(box, ocr_text)` pairs;
+the overlap check crashed the live pipeline (TypeError, int < tuple) on the
+first real page. Fixed with `_box_entry_coords` normalization + regression
+test with the real pair shape (the overnight test only used bare boxes,
+which is why 136 green tests missed it). Suite now 137 + smoke, all green.
+
+### 17.3 Results (8B two-model split -> 30B single-model, this document)
+
+Verified against `scratch/python_review/python_review_final3.md`:
+
+- Standards tree mermaid: now quoted-label form (`A["standards/"]`) with
+  complete hierarchy  best output to date.
+- Page-3 JSON metadata (unboxed): fully reconstructed, incl. inferred
+  `"id": "strength_factor_grade_c"`; first proof of the unboxed-region
+  routing on a real defect.
+- Page-9 folder layout: clean quoted mermaid; page-10 tree (no bordered
+  boxes at all) recovered as a complete plaintext tree  `web/` correctly
+  read where deterministic OCR emitted `## seb`; all `##` heading false
+  positives eliminated.
+- Polish with fuzzy alignment (overnight commit): 4 polished / 13 unchanged
+  / 7 line-drift rejections (was 2/5/16).
+- Residual artifacts: polish pronoun slip ("where I came from"), `C^3` vs
+  `C**3` style drift, loads/ tree emitted as indented list instead of
+  box-drawing glyphs, `I Pole Review Agent Input:` prefix persists.
+
+### 17.4 Operating recipe (this server)
+
+1. One large model resident; use it for BOTH `--vlm` and `--polish`
+   (`--no-pause`). A VL instruct model covers prose polish fine.
+2. Cap ctx-size ~16384 per preset; restart the server to change residency.
+3. `PDF2MD_VLM_TIMEOUT=180` for cold-start margin; transient dropouts are
+   survivable  rerun once to mop up localized fallbacks.
+### 17.5 Clean rerun (same day, server recovered)
+
+`python_review_30b_full2.md`: zero fallback warnings, all 34 fenced blocks
+enriched, page-7 file list fixed (clean JSON array with
+`communications.json`/`guy_wire.json`). Diff vs the first full run: 8/6
+lines  the pipeline is effectively deterministic across repeats at
+temperature 0; one rerun is sufficient to mop up transient fallbacks.
+
+Remaining quality gap: **no section headings** in the output. `HEADING_CUE_RE`
+(heuristics.py) is tuned to the earlier electrical-document structure
+("Stage N:", "Proposed Pipeline", sequence networks) and does not match this
+document's cues ("Layer N - ...", "Data Storage", "Reporting", "GIS
+Integration", "Proposed Folder Layout", "Phase N"). Height/bold fallbacks are
+inert on Tesseract output, and the polish stage can rewrite a `##` line into
+plain prose. Options: extend the cue regex for this document class, or have
+the polish prompt preserve/promote heading lines.
+### 17.6 Polish structure guard (universal  no document cues)
+
+User directive: the converter is universal, so heading detection must rely on
+size/bold only; no document-specific cue regexes. The polish stage must
+therefore never degrade structure:
+
+- `POLISH_PROMPT` now spells out that heading lines (`#`, `##`, `###`), list
+  markers, block quotes and table pipes are preserved exactly (with the
+  "## Layer 6" example).
+- Deterministic fail-closed backstop in `polish_markdown`:
+  `_structure_counts()` compares per-line Markdown marker counts between the
+  original segment and the model response; any difference rejects the
+  segment (new `structure drift` stat). Prompt-level guards are advisory;
+  this backstop is not.
+- Tests: heading-prefix drop is rejected, marker-preserving repair is
+  accepted, prompt content asserted (suite 140 green).
+
+### 18 Reviewer stage (S5) and model routing
+
+**Wired:** `docling_engineering/review.py` + `scripts/review_doc.py`.
+
+- Universal rubric, seven axes (terminology, notation, figures, completeness,
+  flow, plausibility, artifacts). Findings must quote the document verbatim;
+  the model is told to report, never rewrite.
+- Advisory and fail-open: unreachable endpoint, empty body or unparsable output
+  becomes a `status` on the result, never an exception, so a review can never
+  break a conversion. Three states carry the failure: `error`, `unparsed`,
+  `disabled`.
+- Backend spec is the same `openai:<model>@<url>/v1` form as `--vlm`.
+  Key resolution: `PDF2MD_REVIEW_API_KEY`, else `OPENAI_API_KEY`.
+  `build_backend` now also reads `PDF2MD_VLM_API_KEY`, so a single run can mix
+  a keyless local model with a keyed vendor model.
+- Outputs `<doc>.review.json` (machine) and `<doc>.review.md` (curator-facing
+  table + findings). `--fail-on error|revise|fail` for CI-style gating;
+  default never fails.
+- Suite: 150 tests green (10 new reviewer tests).
+
+Usage:
+
+    python scripts\review_doc.py OUT.md \
+      --model "openai:glm-5.3@<endpoint>/v1" --reference ocr.txt
+
+**Routing findings (Oct 2026):**
+
+- Direct OpenAI-compatible endpoint is the automation route. `opencode run` is
+  not usable on this workstation: CLI 1.19.0 reports "Database is not empty and
+  has no session table", and with `OPENCODE_DB` pointed at a fresh file it
+  fails with a server error instead. Keep OpenCode for interactive review.
+- Model catalog check: `glm-5.3-flash` lists at $0.15/M input (not free); the
+  genuinely zero-cost entries are `mimo-v2.6-flash-free` and
+  `deepseek-v4.1-flash-free`. Either way the cost is irrelevant at document
+  scale (a 7 KB conversion is ~2 K tokens), so tier by role rather than price:
+  flash for high-volume per-region work (S3/S4), flagship for the S5 verdict.
+- Reviewer matrix updated in `docs/implementation_plan_v2.md` section 3.2:
+  GLM-5.3 primary, Qwen3.8-27B local fallback, Claude/GPT/Gemini escalation.
+
+**Checkout warning:** two copies of this repo exist. `O:\Data\Programming\Github\
+pdf2md` is the live tree (branch with the polish guard and this work);
+`C:\Users\jmc53\Downloads\pdf2md` is a stale older checkout at 508ed95 with
+unrelated local edits. Edit the O: tree.
+=======
+## 19. VLM Model Sweep Recipe (Python_Power_Systems_Review_20261025_0001.pdf)
 
 Candidate vision backends for the `--vlm` stage, to be swept against the
 new 11-page reference document on the local llama.cpp model router
