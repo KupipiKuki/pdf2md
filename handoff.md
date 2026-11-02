@@ -1528,9 +1528,9 @@ Usage:
 - Reviewer matrix updated in `docs/implementation_plan_v2.md` section 3.2:
   GLM-5.3 primary, Qwen3.8-27B local fallback, Claude/GPT/Gemini escalation.
 
-**Checkout warning:** two copies of this repo exist. `O:\Data\Programming\Github\
+**Checkout warning:** two copies of this repo exist. `.\Github\
 pdf2md` is the live tree (branch with the polish guard and this work);
-`C:\Users\jmc53\Downloads\pdf2md` is a stale older checkout at 508ed95 with
+`.\Downloads\pdf2md` is a stale older checkout at 508ed95 with
 unrelated local edits. Edit the O: tree.
 =======
 ## 19. VLM Model Sweep Recipe (Python_Power_Systems_Review_20261025_0001.pdf)
