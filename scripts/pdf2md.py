@@ -593,6 +593,15 @@ def stack_crop_images(paths, out_dir, name="continuation_stack.png"):
     return out
 
 
+def _box_coords(entry):
+    """Return the (y0, y1, x0, x1) tuple from either a bare box tuple or a
+    ((y0, y1, x0, x1), text) result pair produced by process_page_regions."""
+    if (isinstance(entry, tuple) and len(entry) == 2
+            and isinstance(entry[0], tuple)):
+        return entry[0]
+    return entry
+
+
 def find_unboxed_code_clusters(img, prose_lines, all_boxes, pad=12, min_lines=3):
     """Find code- or tree-like line clusters in the prose (unboxed)
     regions of a page (handoff 15.5-1). Bordered boxes already reach the
@@ -618,7 +627,11 @@ def find_unboxed_code_clusters(img, prose_lines, all_boxes, pad=12, min_lines=3)
         y1 = min(H, max(l["bottom"] for l in block) + pad)
         # Skip clusters that are actually inside a detected bordered box
         # (defensive: masked prose should already exclude them).
-        if any(not (y1 < b[0] or y0 > b[1]) for b in all_boxes):
+        # ``all_boxes`` may be either bare (y0, y1, x0, x1) tuples or the
+        # ((y0, y1, x0, x1), text) result pairs returned by
+        # process_page_regions(); normalize before comparing.
+        if any(not (y1 < b[0] or y0 > b[1])
+               for b in (_box_coords(entry) for entry in all_boxes)):
             continue
         x0 = max(0, min(l["left"] for l in block) - pad)
         band = dark[y0:y1]

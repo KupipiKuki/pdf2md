@@ -1696,6 +1696,47 @@ class TestSection15Roadmap(unittest.TestCase):
         boxes = [(10, 70, 40, 310)]
         self.assertEqual(find_unboxed_code_clusters(img, lines, boxes), [])
 
+    def test_find_unboxed_code_clusters_accepts_box_results(self):
+        # Regression: process_page_regions() returns ((y0, y1, x0, x1), text)
+        # pairs, not bare box tuples. This shape must not crash and must
+        # still detect that the cluster is covered by a bordered box.
+        from PIL import Image
+        import numpy as np
+        arr = np.full((200, 400), 255, dtype=np.uint8)
+        for y in (20, 40, 60):
+            arr[y, 50:300] = 0
+        img = Image.fromarray(arr)
+        lines = [
+            {"text": '1 d = {"a": 1}', "top": 15, "bottom": 25, "height": 10,
+             "left": 50},
+            {"text": '2 x = [d["a"]', "top": 35, "bottom": 45, "height": 10,
+             "left": 50},
+            {"text": "3 if x > 0:", "top": 55, "bottom": 65, "height": 10,
+             "left": 50},
+        ]
+        box_results = [((10, 70, 40, 310), "d = {")]
+        self.assertEqual(find_unboxed_code_clusters(img, lines, box_results), [])
+
+    def test_find_unboxed_code_clusters_accepts_box_results_free_cluster(self):
+        # With unrelated box results, an unboxed cluster must still be found.
+        from PIL import Image
+        import numpy as np
+        arr = np.full((200, 400), 255, dtype=np.uint8)
+        for y in (20, 40, 60):
+            arr[y, 50:300] = 0
+        img = Image.fromarray(arr)
+        lines = [
+            {"text": '1 d = {"a": 1}', "top": 15, "bottom": 25, "height": 10,
+             "left": 50},
+            {"text": '2 x = [d["a"]', "top": 35, "bottom": 45, "height": 10,
+             "left": 50},
+            {"text": "3 if x > 0:", "top": 55, "bottom": 65, "height": 10,
+             "left": 50},
+        ]
+        box_results = [((150, 190, 40, 310), "unrelated")]
+        clusters = find_unboxed_code_clusters(img, lines, box_results)
+        self.assertEqual(len(clusters), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
