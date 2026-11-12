@@ -230,8 +230,10 @@ deflectionFactor = 1.2
 becomes:
 
 ```python
-deflection/ Actual implementation:
+deflection
 ```
+
+Actual implementation:
 
 For a cantilever:
 
@@ -368,10 +370,10 @@ analytics/
 or
 
 ```python
-1 reporting/
+reporting/
 ```
 
-Reporting
+## Reporting
 
 Separate entirely.
 
@@ -397,7 +399,7 @@ GeoJSON
 
 Same calculation result object fed to multiple output formats.
 
-GIS Integration
+## GIS Integration
 
 This is where I think your next-generation version can significantly outperform commercial utilities.
 
@@ -426,7 +428,7 @@ CircuitGeometry
 
 Since you already calculate actual conductor geometry, you'll gain more accuracy than many simplified pole loading tools.
 
-Al Integration
+## Al Integration
 
 For what you've been discussing recently, this is where I'd deliberately leave hooks.
 
@@ -448,72 +450,71 @@ PoleResult
 
 Output: 7
 
-Pole overloaded due primarily to: oa = - Secondary triplex - Fiber attachment - Span angle 38° Recommended: - 10M anchor - Replace with Class 3 pole
+Pole overloaded due primarily to:
+- Secondary triplex
+- Fiber attachment
+- Span angle 38°
+Recommended:
+- 10M anchor
+- Replace with Class 3 pole
 
-WindMil Agent Reads:
+### WindMil Agent
+Reads:
 
 - WindMil exports
-- e
 - Device models
 
 and generates engineering recommendations.
 
-Proposed Folder Layout
+## Proposed Folder Layout
 
 ```mermaid
-flowchart TD
-    polecad_next_1["polecad_next/"]
-    api_2["api/"]
-    core_3["core/"]
-    geometry_4["— geometry/"]
-    Lloads_5["L— loads/"]
-    Lstructure_6["L— structure/"]
-    deflection_7["deflection/"]
-    polecad_next_1 --> api_2
-    polecad_next_1 --> core_3
-    core_3 --> geometry_4
-    core_3 --> Lloads_5
-    core_3 --> Lstructure_6
-    core_3 --> deflection_7
+treeView-beta
+    polecad_next/
+        api/
+        core/
+            geometry/
+            loads/
+            structure/
+            deflection/
+            standards/
+
+    models/
+        pole.py
+        span.py
+        conductor.py
+        attachment.py
+        guy.py
+
+    data/
+        ansi/
+        nesc/
+        rus/
+
+    reporting/
+
+    gis/
+
+    ai/
+
+    web/
+
+    tests/
 ```
 
-<!-- page 10 (OCR) -->
-
-```python
-standards/
-
-models/
-    pole.py
-    span.py
-    conductor.py
-    attachment.py
-    guy.py
-
-data/
-    ansi/
-    nesc/
-    rus/
-
-reporting/
-
-gis/
-
-ai/
-
-web/
-
-tests/
-```
-
-If I Were Prioritizing the Rewrite
+## If I Were Prioritizing the Rewrite
 
 Phase 1 (Highest Value)
 
-Replace DataFrames with typed models. Separate geometry from loading. Externalize all constants.
+- Replace DataFrames with typed models.
+- Separate geometry from loading.
+- Externalize all constants.
 
 Phase 2
 
-Proper load-case engine. Proper standards library. Unit testing.
+- Proper load-case engine.
+- Proper standards library.
+- Unit testing.
 
 <!-- page 11 (OCR) -->
 
@@ -534,6 +535,8 @@ Phase 5
 - WindMil integration.
 - Al engineering review.
 - Automated recommendation engine.
+
+---
 
 The most important lesson from your original application is that the geometry-centric approach was actually ahead of many utility calculations of that era. I would preserve that concept. The biggest modernization opportunity is making every load, factor, equation, and standard traceable to a source document so that an engineer can click a result and immediately see which RUS, ANSI, or NESC equation produced it. That single design decision will make the next version much easier to trust, maintain, and eventually hand off to someone else.
 
