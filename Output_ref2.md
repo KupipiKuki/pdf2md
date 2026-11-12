@@ -4,7 +4,7 @@
 
 Given your background, I would not approach this as a simple "refactor the code" effort.
 
-I would approach it as building a utility engineering calculation platform that happens to start with pole loading.
+I would approach it as building a **utility engineering calculation platform** that happens to start with pole loading.
 
 Your original application solved a specific problem:
 
@@ -333,7 +333,7 @@ returns:
 utilization
 ```
 
-### Data Storage
+## Data Storage
 
 For engineering reference data:
 
@@ -341,15 +341,11 @@ JSON.
 
 Examples:
 
-```json
-{
-  "pole_species": "json",
-  "conductors": "json",
-  "communications": "json",
-  "guy_wire": "json",
-  "anchors": "json"
-}
-```
+pole_species.json  
+conductors.json  
+communications.json  
+guy_wire.json  
+anchors.jsom  
 
 For projects:
 
@@ -454,6 +450,7 @@ Pole overloaded due primarily to:
 - Secondary triplex
 - Fiber attachment
 - Span angle 38°
+  
 Recommended:
 - 10M anchor
 - Replace with Class 3 pole
@@ -462,6 +459,7 @@ Recommended:
 Reads:
 
 - WindMil exports
+- LUA libraries
 - Device models
 
 and generates engineering recommendations.
